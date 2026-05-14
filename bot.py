@@ -29,9 +29,8 @@ from telegram.ext import (
     filters,
 )
 
-BOT_TOKEN = "7613743615:AAGLDY1BAhxZ07aXvasBxkuZFp3FuPLn8GI"
-GEMINI_API_KEY = "AIzaSyByMxvj9YIm6iZCJwK3VtpGOnTfZvFOQXI"
-GEMINI_MODEL = "gemini-2.5-flash"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 IDS_LIBERADOS = {
     8672397104,
