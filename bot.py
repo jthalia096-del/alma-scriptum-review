@@ -448,53 +448,50 @@ def ebook_convert_disponivel():
     
 
 def converter_com_calibre(entrada, saida):
+    if not ebook_convert_disponivel():
+        raise Exception(
+            "O conversor do Calibre não foi encontrado. "
+            "Instale o Calibre ou deixe o comando ebook-convert disponível."
+        )
+
+    entrada = Path(entrada)
+    saida = Path(saida)
+
+    if entrada.suffix.lower() == ".epub":
+        saida = saida.with_suffix(".pdf")
+
+    elif entrada.suffix.lower() == ".pdf":
+        saida = saida.with_suffix(".epub")
+
+    else:
+        raise Exception("Formato não suportado. Use apenas EPUB ou PDF.")
 
     env = os.environ.copy()
-
     env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+    env["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu"
     env["QT_QPA_PLATFORM"] = "offscreen"
-    env["QTWEBENGINE_CHROMIUM_FLAGS"] = (
-        "--no-sandbox "
-        "--disable-gpu "
-        "--disable-software-rasterizer "
-        "--disable-dev-shm-usage"
-    )
-
     env["QT_QUICK_BACKEND"] = "software"
     env["LIBGL_ALWAYS_SOFTWARE"] = "1"
 
     comando = [
-    "ebook-convert",
-    str(entrada),
-    str(saida),
-
-    "--paper-size", "a5",
-
-    "--pdf-default-font-size", "14",
-
-    "--disable-font-rescaling",
-
-    "--chapter-mark", "none",
-
-    "--page-breaks-before", "/",
-
-    "--extra-css",
-    "body{font-family:serif;}",
-]
+        "ebook-convert",
+        str(entrada),
+        str(saida),
+    ]
 
     resultado = subprocess.run(
         comando,
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=1200,
         env=env,
     )
 
     if resultado.returncode != 0:
         raise Exception(
-            resultado.stderr[-1000:]
-            or resultado.stdout[-1000:]
-            or "Erro na conversão."
+            resultado.stderr[-1500:]
+            or resultado.stdout[-1500:]
+            or "Falha na conversão."
         )
 
 
