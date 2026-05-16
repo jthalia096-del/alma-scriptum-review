@@ -32,6 +32,8 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MAX_GEMINI_TRECHOS = int(os.getenv("MAX_GEMINI_TRECHOS", "80"))
+GEMINI_PAUSA = float(os.getenv("GEMINI_PAUSA", "0.15"))
 
 IDS_LIBERADOS = {
     8672397104,
@@ -160,19 +162,11 @@ def remover_sujeiras_texto(texto):
     texto = re.sub(r"\bdaA\s+", "da ", texto)
     texto = re.sub(r"\bdoO\s+", "do ", texto)
 
-    texto = re.sub(
-        r"([a-záàâãéêíóôõúç]{4,})(incluindo|experiência|personagem|história|série|saga|livro)",
-        r"\1 \2",
-        texto,
-        flags=re.I
-    )
-
     texto = re.sub(r"\s+([,.!?;:])", r"\1", texto)
     texto = re.sub(r"([,.!?;:])([A-Za-zÀ-ÿ])", r"\1 \2", texto)
-    texto = re.sub(r"\s+", " ", texto)
+    texto = re.sub(r"\s{2,}", " ", texto)
 
     return texto.strip()
-
 
 def texto_suspeito_para_gemini(texto):
     if not texto:
@@ -188,21 +182,7 @@ def texto_suspeito_para_gemini(texto):
         return True
 
     # Palavra quebrada por espaço indevido: lágri mas, memó ria, gr ito
-    if re.search(
-        r"\b[a-záàâãéêíóôõúç]{2,}\s+(mas|ria|rias|ção|ções|mente|ndo|ido|ida|ados|adas)\b",
-        t,
-        flags=re.I
-    ):
-        return True
-
-    # Erro comum de tradução/extração: TO grito
-    if re.search(r"\b[A-Z]{2,}\s+[a-záàâãéêíóôõúç]{2,}", t):
-        return True
-
-    # Muitas palavras curtinhas pode indicar palavra partida
-    palavras = re.findall(r"\b[A-Za-zÀ-ÿ]+\b", t)
-    curtas = re.findall(r"\b[a-záàâãéêíóôõúç]{1,2}\b", t)
-    if len(palavras) >= 12 and len(curtas) / max(len(palavras), 1) > 0.22:
+    if re.search(r"\b(lá\s*gri\s*mas|gr\s*ito|memó\s*ria|fí\s*sica|rá\s*pido|cére\s*bro)\b", t, flags=re.I):
         return True
 
     suspeitas = [
@@ -236,19 +216,8 @@ Regras obrigatórias:
 - Não traduza nomes próprios.
 - Não adicione frases novas.
 - Não remova conteúdo narrativo.
-- Corrija somente:
-  * palavras grudadas;
-  * palavras quebradas por espaço indevido;
-  * pontuação;
-  * acentos;
-  * pequenos erros visuais da tradução.
-- Exemplos:
-  * "lágri mas" → "lágrimas"
-  * "gr ito" → "grito"
-  * "quememória" → "que memória"
-  * "bemEspero" → "bem? Espero"
-  * "físicaSem" → "física. Sem"
-  * "TO grito" → "O grito"
+- Corrija apenas palavras grudadas, palavras quebradas por espaço indevido, espaços, pontuação e pequenos erros visuais.
+- Exemplos: "lágri mas" vira "lágrimas"; "gr ito" vira "grito"; "TO grito" vira "O grito"; "físicaSem" vira "física. Sem".
 - Se houver trecho em inglês, traduza para português brasileiro.
 - Retorne SOMENTE o texto corrigido, sem explicação.
 
@@ -277,7 +246,7 @@ Trecho:
     }
 
     try:
-        resposta = requests.post(url, json=payload, timeout=60)
+        resposta = requests.post(url, json=payload, timeout=25)
 
         if resposta.status_code != 200:
             return remover_sujeiras_texto(texto)
@@ -308,6 +277,7 @@ def corrigir_palavras_grudadas(texto):
     if not texto:
         return texto
 
+    # Correções diretas vistas nos EPUBs traduzidos
     correcoes = {
         "deTODOS.Cada": "de TODOS. Cada",
         "deTODOS": "de TODOS",
@@ -315,8 +285,6 @@ def corrigir_palavras_grudadas(texto):
         "paraaNola": "para a Nola",
         "paraaNo": "para a No",
         "aNola": "a Nola",
-        "WitchesSériemas": "Witches Série, mas",
-        "Sériemas": "Série, mas",
         "tambémpara": "também para",
         "relacionamentoscruciais": "relacionamentos cruciais",
         "daA Saga": "da Saga",
@@ -330,7 +298,6 @@ def corrigir_palavras_grudadas(texto):
         "www. smauggy. com": "www.smauggy.com",
         "smauggy. com": "smauggy.com",
 
-        # Erros vistos nos testes
         "quememória": "que memória",
         "quememoria": "que memória",
         "caralhoquememória": "caralho, que memória",
@@ -342,60 +309,53 @@ def corrigir_palavras_grudadas(texto):
         "físicasem": "física. Sem",
         "semviolência": "sem violência",
         "semviolencia": "sem violência",
-        "lágri mas": "lágrimas",
-        "lá gri mas": "lágrimas",
-        "gr ito": "grito",
-        "TO grito": "O grito",
-        "TO gr ito": "O grito",
         "seunúmero": "seu número",
         "seunumero": "seu número",
         "minhatristeza": "minha tristeza",
         "ignorá-lasMAS": "ignorá-las. MAS",
         "ignora-lasMAS": "ignorá-las. MAS",
+        "eununcadeixarei": "eu nunca deixarei",
+
+        # palavras quebradas vistas em leitura
+        "lágri mas": "lágrimas",
+        "lá gri mas": "lágrimas",
+        "lágr i mas": "lágrimas",
+        "gr ito": "grito",
+        "TO grito": "O grito",
+        "TO gr ito": "O grito",
+        "memó ria": "memória",
+        "fí sica": "física",
+        "rá pido": "rápido",
+        "cére bro": "cérebro",
     }
 
     for errado, certo in correcoes.items():
         texto = texto.replace(errado, certo)
 
+    # Junta pedaços quebrados comuns
+    texto = re.sub(r"\blá\s*gri\s*mas\b", "lágrimas", texto, flags=re.I)
+    texto = re.sub(r"\bgr\s*ito\b", "grito", texto, flags=re.I)
+    texto = re.sub(r"\bmemó\s*ria\b", "memória", texto, flags=re.I)
+    texto = re.sub(r"\bfí\s*sica\b", "física", texto, flags=re.I)
+    texto = re.sub(r"\brá\s*pido\b", "rápido", texto, flags=re.I)
+    texto = re.sub(r"\bcére\s*bro\b", "cérebro", texto, flags=re.I)
+
+    # Separa camelCase/maiúscula grudada: passaEm, físicaSem
     texto = re.sub(
         r"([a-záàâãéêíóôõúç])([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç]{2,})",
         r"\1 \2",
         texto
     )
 
-    texto = re.sub(
-        r"([.!?])([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ])",
-        r"\1 \2",
-        texto
-    )
+    texto = re.sub(r"([.!?])([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ])", r"\1 \2", texto)
 
-    padroes_comuns = [
-        "que", "porque", "quando", "agora", "então",
-        "para", "com", "sem", "nesse", "nessa",
-        "meu", "minha", "seu", "sua",
-        "experiência", "história", "historia",
-        "memória", "memoria",
-        "violência", "violencia",
-        "física", "fisica",
-        "incluindo",
-    ]
-
-    for palavra in padroes_comuns:
-        texto = re.sub(
-            rf"([a-záàâãéêíóôõúç]{{3,}})({palavra})\b",
-            r"\1 \2",
-            texto,
-            flags=re.I
-        )
-
-    texto = re.sub(r"\blá\s*gri\s*mas\b", "lágrimas", texto, flags=re.I)
-    texto = re.sub(r"\bgr\s*ito\b", "grito", texto, flags=re.I)
-    texto = re.sub(r"\bmemó\s*ria\b", "memória", texto, flags=re.I)
-    texto = re.sub(r"\bfí\s*sica\b", "física", texto, flags=re.I)
+    # Separações seguras e específicas
+    texto = re.sub(r"\b([a-záàâãéêíóôõúç]{3,})(incluindo|experiência|história|memória|violência|física)\b", r"\1 \2", texto, flags=re.I)
+    texto = re.sub(r"\b(para)(a|o)([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ])", r"\1 \2 \3", texto)
 
     texto = re.sub(r"\s+([,.!?;:])", r"\1", texto)
     texto = re.sub(r"([,.!?;:])([A-Za-zÀ-ÿ])", r"\1 \2", texto)
-    texto = re.sub(r"\s+", " ", texto)
+    texto = re.sub(r"\s{2,}", " ", texto)
     texto = texto.replace("sitewww.", "site www.")
     texto = texto.replace("www. ", "www.")
     texto = texto.replace(". com", ".com")
@@ -425,53 +385,53 @@ def revisar_html_simples(html):
 def revisar_html_gemini(html):
     soup = BeautifulSoup(html, "html.parser")
     corrigidos = 0
+    chamadas_gemini = 0
 
-    # Primeiro: limpeza simples em todos os nós de texto sem destruir HTML
+    # Limpeza simples primeiro, em todo nó de texto, sem destruir HTML
     for node in soup.find_all(string=True):
         if node.parent and node.parent.name in ["script", "style", "code", "pre", "head", "title"]:
             continue
 
-        original_node = str(node)
+        original = str(node)
 
-        if not original_node.strip():
-            continue
-
-        limpo_node = remover_sujeiras_texto(original_node)
-        limpo_node = corrigir_palavras_grudadas(limpo_node)
-
-        if limpo_node != original_node.strip():
-            node.replace_with(NavigableString(limpo_node))
-            corrigidos += 1
-
-    # Segundo: Gemini nos blocos suspeitos, com mais contexto
-    blocos = soup.find_all(["p", "div", "span", "li", "blockquote"])
-
-    for tag in blocos:
-        if tag.find(["p", "div", "li", "blockquote"]):
-            continue
-
-        original = tag.get_text(" ", strip=True)
-
-        if not original or len(original) < 8:
+        if not original.strip():
             continue
 
         limpo = remover_sujeiras_texto(original)
         limpo = corrigir_palavras_grudadas(limpo)
 
-        if texto_suspeito_para_gemini(limpo):
-            novo = gemini_revisar_trecho(limpo)
-            time.sleep(0.7)
-        else:
-            novo = limpo
+        if limpo != original.strip():
+            node.replace_with(NavigableString(limpo))
+            corrigidos += 1
 
+    # Gemini só nos nós suspeitos, com limite para não travar nem gastar cota
+    for node in soup.find_all(string=True):
+        if chamadas_gemini >= MAX_GEMINI_TRECHOS:
+            break
+
+        if node.parent and node.parent.name in ["script", "style", "code", "pre", "head", "title"]:
+            continue
+
+        original = str(node).strip()
+
+        if not original or len(original) < 8:
+            continue
+
+        if not texto_suspeito_para_gemini(original):
+            continue
+
+        novo = gemini_revisar_trecho(original)
+        chamadas_gemini += 1
+        time.sleep(GEMINI_PAUSA)
+
+        # Proteção contra IA apagar/recriar demais
         if (
             novo
             and novo != original
-            and len(novo) >= max(3, int(len(original) * 0.45))
-            and len(novo) <= max(120, int(len(original) * 2.2))
+            and len(novo) >= max(3, int(len(original) * 0.55))
+            and len(novo) <= max(120, int(len(original) * 1.8))
         ):
-            tag.clear()
-            tag.append(NavigableString(novo))
+            node.replace_with(NavigableString(novo))
             corrigidos += 1
 
     return str(soup), corrigidos
