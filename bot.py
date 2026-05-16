@@ -464,24 +464,23 @@ def converter_com_calibre(entrada, saida):
     env["LIBGL_ALWAYS_SOFTWARE"] = "1"
 
     comando = [
-        "ebook-convert",
-        str(entrada),
-        str(saida),
+    "ebook-convert",
+    str(entrada),
+    str(saida),
 
-        "--pdf-page-numbers",
-        "--paper-size", "a5",
+    "--paper-size", "a5",
 
-        "--pdf-default-font-size", "14",
+    "--pdf-default-font-size", "14",
 
-        "--disable-font-rescaling",
+    "--disable-font-rescaling",
 
-        "--chapter-mark", "none",
+    "--chapter-mark", "none",
 
-        "--page-breaks-before", "/",
+    "--page-breaks-before", "/",
 
-        "--extra-css",
-        "body{font-family:serif;}",
-    ]
+    "--extra-css",
+    "body{font-family:serif;}",
+]
 
     resultado = subprocess.run(
         comando,
