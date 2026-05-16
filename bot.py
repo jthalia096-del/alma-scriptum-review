@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
 
 from telegram import (
@@ -178,29 +178,50 @@ def texto_suspeito_para_gemini(texto):
     if not texto:
         return False
 
-    t = texto.strip()
+    t = str(texto).strip()
 
     if len(t) < 8:
         return False
 
+    # Palavra grudada com maiúscula no meio: passaEm, físicaSem
     if re.search(r"[a-záàâãéêíóôõúç]{3,}[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç]{2,}", t):
+        return True
+
+    # Palavra quebrada por espaço indevido: lágri mas, memó ria, gr ito
+    if re.search(
+        r"\b[a-záàâãéêíóôõúç]{2,}\s+(mas|ria|rias|ção|ções|mente|ndo|ido|ida|ados|adas)\b",
+        t,
+        flags=re.I
+    ):
+        return True
+
+    # Erro comum de tradução/extração: TO grito
+    if re.search(r"\b[A-Z]{2,}\s+[a-záàâãéêíóôõúç]{2,}", t):
+        return True
+
+    # Muitas palavras curtinhas pode indicar palavra partida
+    palavras = re.findall(r"\b[A-Za-zÀ-ÿ]+\b", t)
+    curtas = re.findall(r"\b[a-záàâãéêíóôõúç]{1,2}\b", t)
+    if len(palavras) >= 12 and len(curtas) / max(len(palavras), 1) > 0.22:
         return True
 
     suspeitas = [
         "deTODOS", "TODOS.Cada", "completaincluindo",
         "umaexperiência", "paraaNo", "passaEm",
-        "deda", "dea", "doa",
+        "deda", "dea", "doa", "quememória",
+        "caralhoquememória", "bemEspero", "físicaSem",
+        "semviolência", "lágri mas", "gr ito", "TO grito",
     ]
 
     for item in suspeitas:
         if item.lower() in t.lower():
             return True
 
+    # Inglês que escapou
     if re.search(r"\b(the|and|with|your|you|she|he|they|this|that|was|were|have|from|into|would|could|should)\b", t, flags=re.I):
         return True
 
     return False
-
 
 def gemini_revisar_trecho(texto):
     if not GEMINI_API_KEY or "COLE_SUA_CHAVE" in GEMINI_API_KEY:
@@ -215,7 +236,19 @@ Regras obrigatórias:
 - Não traduza nomes próprios.
 - Não adicione frases novas.
 - Não remova conteúdo narrativo.
-- Corrija apenas palavras grudadas, espaços, pontuação e pequenos erros visuais.
+- Corrija somente:
+  * palavras grudadas;
+  * palavras quebradas por espaço indevido;
+  * pontuação;
+  * acentos;
+  * pequenos erros visuais da tradução.
+- Exemplos:
+  * "lágri mas" → "lágrimas"
+  * "gr ito" → "grito"
+  * "quememória" → "que memória"
+  * "bemEspero" → "bem? Espero"
+  * "físicaSem" → "física. Sem"
+  * "TO grito" → "O grito"
 - Se houver trecho em inglês, traduza para português brasileiro.
 - Retorne SOMENTE o texto corrigido, sem explicação.
 
@@ -280,6 +313,7 @@ def corrigir_palavras_grudadas(texto):
         "deTODOS": "de TODOS",
         "TODOS.Cada": "TODOS. Cada",
         "paraaNola": "para a Nola",
+        "paraaNo": "para a No",
         "aNola": "a Nola",
         "WitchesSériemas": "Witches Série, mas",
         "Sériemas": "Série, mas",
@@ -289,16 +323,35 @@ def corrigir_palavras_grudadas(texto):
         "umaexperiência": "uma experiência",
         "cinematográfica completaincluindo": "cinematográfica completa incluindo",
         "completaincluindo": "completa incluindo",
-        "sitewww": "site www",
-        "meu sitewww": "meu site www",
-        "uma experiência": "uma experiência",
-        "completaincluindo": "completa incluindo",
-        "completa incluindo": "completa incluindo",
         "cinematográficacompleta": "cinematográfica completa",
         "sitewww": "site www",
+        "meu sitewww": "meu site www",
         "site www. smauggy. com": "site www.smauggy.com",
         "www. smauggy. com": "www.smauggy.com",
         "smauggy. com": "smauggy.com",
+
+        # Erros vistos nos testes
+        "quememória": "que memória",
+        "quememoria": "que memória",
+        "caralhoquememória": "caralho, que memória",
+        "caralhoquememoria": "caralho, que memória",
+        "bemEspero": "bem? Espero",
+        "bem?Espero": "bem? Espero",
+        "físicaSem": "física. Sem",
+        "fisicaSem": "física. Sem",
+        "físicasem": "física. Sem",
+        "semviolência": "sem violência",
+        "semviolencia": "sem violência",
+        "lágri mas": "lágrimas",
+        "lá gri mas": "lágrimas",
+        "gr ito": "grito",
+        "TO grito": "O grito",
+        "TO gr ito": "O grito",
+        "seunúmero": "seu número",
+        "seunumero": "seu número",
+        "minhatristeza": "minha tristeza",
+        "ignorá-lasMAS": "ignorá-las. MAS",
+        "ignora-lasMAS": "ignorá-las. MAS",
     }
 
     for errado, certo in correcoes.items():
@@ -316,51 +369,94 @@ def corrigir_palavras_grudadas(texto):
         texto
     )
 
+    padroes_comuns = [
+        "que", "porque", "quando", "agora", "então",
+        "para", "com", "sem", "nesse", "nessa",
+        "meu", "minha", "seu", "sua",
+        "experiência", "história", "historia",
+        "memória", "memoria",
+        "violência", "violencia",
+        "física", "fisica",
+        "incluindo",
+    ]
+
+    for palavra in padroes_comuns:
+        texto = re.sub(
+            rf"([a-záàâãéêíóôõúç]{{3,}})({palavra})\b",
+            r"\1 \2",
+            texto,
+            flags=re.I
+        )
+
+    texto = re.sub(r"\blá\s*gri\s*mas\b", "lágrimas", texto, flags=re.I)
+    texto = re.sub(r"\bgr\s*ito\b", "grito", texto, flags=re.I)
+    texto = re.sub(r"\bmemó\s*ria\b", "memória", texto, flags=re.I)
+    texto = re.sub(r"\bfí\s*sica\b", "física", texto, flags=re.I)
+
     texto = re.sub(r"\s+([,.!?;:])", r"\1", texto)
+    texto = re.sub(r"([,.!?;:])([A-Za-zÀ-ÿ])", r"\1 \2", texto)
     texto = re.sub(r"\s+", " ", texto)
-    texto = re.sub(r"\b(\w+)(incluindo)\b", r"\1 incluindo", texto, flags=re.I)
-    texto = re.sub(r"\b(\w+)(experiência)\b", r"\1 experiência", texto, flags=re.I)
     texto = texto.replace("sitewww.", "site www.")
     texto = texto.replace("www. ", "www.")
     texto = texto.replace(". com", ".com")
 
     return texto.strip()
 
-
 def revisar_html_simples(html):
     soup = BeautifulSoup(html, "html.parser")
 
-    for tag in soup.find_all(["p", "div", "span"]):
+    for node in soup.find_all(string=True):
+        if node.parent and node.parent.name in ["script", "style", "code", "pre", "head", "title"]:
+            continue
 
-        texto_original = tag.get_text(" ", strip=True)
+        texto_original = str(node)
 
-        if not texto_original:
+        if not texto_original.strip():
             continue
 
         texto_corrigido = remover_sujeiras_texto(texto_original)
         texto_corrigido = corrigir_palavras_grudadas(texto_corrigido)
 
-        if texto_corrigido != texto_original:
-            tag.clear()
-            tag.append(texto_corrigido)
+        if texto_corrigido != texto_original.strip():
+            node.replace_with(NavigableString(texto_corrigido))
 
     return str(soup)
-
 
 def revisar_html_gemini(html):
     soup = BeautifulSoup(html, "html.parser")
     corrigidos = 0
 
-    for tag in soup.find_all(string=True):
-        if tag.parent and tag.parent.name in ["script", "style", "code", "pre"]:
+    # Primeiro: limpeza simples em todos os nós de texto sem destruir HTML
+    for node in soup.find_all(string=True):
+        if node.parent and node.parent.name in ["script", "style", "code", "pre", "head", "title"]:
             continue
 
-        original = str(tag)
+        original_node = str(node)
 
-        if not original.strip():
+        if not original_node.strip():
+            continue
+
+        limpo_node = remover_sujeiras_texto(original_node)
+        limpo_node = corrigir_palavras_grudadas(limpo_node)
+
+        if limpo_node != original_node.strip():
+            node.replace_with(NavigableString(limpo_node))
+            corrigidos += 1
+
+    # Segundo: Gemini nos blocos suspeitos, com mais contexto
+    blocos = soup.find_all(["p", "div", "span", "li", "blockquote"])
+
+    for tag in blocos:
+        if tag.find(["p", "div", "li", "blockquote"]):
+            continue
+
+        original = tag.get_text(" ", strip=True)
+
+        if not original or len(original) < 8:
             continue
 
         limpo = remover_sujeiras_texto(original)
+        limpo = corrigir_palavras_grudadas(limpo)
 
         if texto_suspeito_para_gemini(limpo):
             novo = gemini_revisar_trecho(limpo)
@@ -368,12 +464,17 @@ def revisar_html_gemini(html):
         else:
             novo = limpo
 
-        if novo != original:
-            tag.replace_with(novo)
+        if (
+            novo
+            and novo != original
+            and len(novo) >= max(3, int(len(original) * 0.45))
+            and len(novo) <= max(120, int(len(original) * 2.2))
+        ):
+            tag.clear()
+            tag.append(NavigableString(novo))
             corrigidos += 1
 
     return str(soup), corrigidos
-
 
 def revisar_epub(entrada, saida):
     book = epub.read_epub(str(entrada))
