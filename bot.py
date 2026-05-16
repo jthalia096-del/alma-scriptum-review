@@ -31,6 +31,7 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 IDS_LIBERADOS = {
     8672397104,
@@ -453,15 +454,29 @@ def converter_com_calibre(entrada, saida):
             "Instale o Calibre ou deixe o comando ebook-convert disponível."
         )
 
+    env = os.environ.copy()
+    env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox"
+
     resultado = subprocess.run(
-        ["ebook-convert", str(entrada), str(saida)],
+        [
+            "ebook-convert",
+            str(entrada),
+            str(saida),
+        ],
         capture_output=True,
         text=True,
         timeout=1200,
+        env=env,
     )
 
     if resultado.returncode != 0:
-        raise Exception(resultado.stderr[-800:] or "Falha na conversão.")
+        raise Exception(
+            resultado.stderr[-1200:]
+            or resultado.stdout[-1200:]
+            or "Falha na conversão."
+        )
 
 
 def limpar_sessao_capa(user_id):
