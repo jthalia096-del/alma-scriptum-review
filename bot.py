@@ -456,15 +456,36 @@ def converter_com_calibre(entrada, saida):
 
     env = os.environ.copy()
     env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+    env["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu --disable-software-rasterizer"
     env["QT_QPA_PLATFORM"] = "offscreen"
-    env["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox"
+    env["QT_QUICK_BACKEND"] = "software"
+    env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+    env["XDG_RUNTIME_DIR"] = "/tmp/runtime-root"
+
+    Path(env["XDG_RUNTIME_DIR"]).mkdir(parents=True, exist_ok=True)
+
+    comando_base = [
+        "ebook-convert",
+        str(entrada),
+        str(saida),
+        "--disable-font-rescaling",
+    ]
+
+    # No Railway/Linux, às vezes o QtWebEngine precisa de tela falsa.
+    # Se xvfb-run existir, usamos ele; senão roda direto com variáveis offscreen.
+    xvfb = shutil.which("xvfb-run")
+    if xvfb:
+        comando = [
+            xvfb,
+            "-a",
+            "-s",
+            "-screen 0 1024x768x24",
+        ] + comando_base
+    else:
+        comando = comando_base
 
     resultado = subprocess.run(
-        [
-            "ebook-convert",
-            str(entrada),
-            str(saida),
-        ],
+        comando,
         capture_output=True,
         text=True,
         timeout=1200,
@@ -473,8 +494,8 @@ def converter_com_calibre(entrada, saida):
 
     if resultado.returncode != 0:
         raise Exception(
-            resultado.stderr[-1200:]
-            or resultado.stdout[-1200:]
+            resultado.stderr[-1500:]
+            or resultado.stdout[-1500:]
             or "Falha na conversão."
         )
 
