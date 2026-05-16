@@ -445,58 +445,57 @@ def salvar_imagem_temp(img):
 
 def ebook_convert_disponivel():
     return shutil.which("ebook-convert") is not None
-
+    
 
 def converter_com_calibre(entrada, saida):
-    if not ebook_convert_disponivel():
-        raise Exception(
-            "O conversor do Calibre não foi encontrado. "
-            "Instale o Calibre ou deixe o comando ebook-convert disponível."
-        )
 
     env = os.environ.copy()
+
     env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
-    env["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu --disable-software-rasterizer"
     env["QT_QPA_PLATFORM"] = "offscreen"
+    env["QTWEBENGINE_CHROMIUM_FLAGS"] = (
+        "--no-sandbox "
+        "--disable-gpu "
+        "--disable-software-rasterizer "
+        "--disable-dev-shm-usage"
+    )
+
     env["QT_QUICK_BACKEND"] = "software"
     env["LIBGL_ALWAYS_SOFTWARE"] = "1"
-    env["XDG_RUNTIME_DIR"] = "/tmp/runtime-root"
 
-    Path(env["XDG_RUNTIME_DIR"]).mkdir(parents=True, exist_ok=True)
-
-    comando_base = [
+    comando = [
         "ebook-convert",
         str(entrada),
         str(saida),
-        "--disable-font-rescaling",
-    ]
 
-    # No Railway/Linux, às vezes o QtWebEngine precisa de tela falsa.
-    # Se xvfb-run existir, usamos ele; senão roda direto com variáveis offscreen.
-    xvfb = shutil.which("xvfb-run")
-    if xvfb:
-        comando = [
-            xvfb,
-            "-a",
-            "-s",
-            "-screen 0 1024x768x24",
-        ] + comando_base
-    else:
-        comando = comando_base
+        "--pdf-page-numbers",
+        "--paper-size", "a5",
+
+        "--pdf-default-font-size", "14",
+
+        "--disable-font-rescaling",
+
+        "--chapter-mark", "none",
+
+        "--page-breaks-before", "/",
+
+        "--extra-css",
+        "body{font-family:serif;}",
+    ]
 
     resultado = subprocess.run(
         comando,
         capture_output=True,
         text=True,
-        timeout=1200,
+        timeout=300,
         env=env,
     )
 
     if resultado.returncode != 0:
         raise Exception(
-            resultado.stderr[-1500:]
-            or resultado.stdout[-1500:]
-            or "Falha na conversão."
+            resultado.stderr[-1000:]
+            or resultado.stdout[-1000:]
+            or "Erro na conversão."
         )
 
 
