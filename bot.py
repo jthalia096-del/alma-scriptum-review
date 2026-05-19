@@ -5,6 +5,7 @@ import time
 import json
 import shutil
 import subprocess
+import asyncio
 from pathlib import Path
 
 import requests
@@ -32,8 +33,8 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-MAX_GEMINI_TRECHOS = int(os.getenv("MAX_GEMINI_TRECHOS", "45"))
-GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "18"))
+MAX_GEMINI_TRECHOS = int(os.getenv("MAX_GEMINI_TRECHOS", "18"))
+GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "12"))
 
 IDS_LIBERADOS = {
     8672397104,
@@ -45,6 +46,7 @@ TEMP_DIR = BASE_DIR / "temp"
 TEMP_DIR.mkdir(exist_ok=True)
 
 usuarios = {}
+cancelamentos = set()
 
 
 def autorizado(user_id):
@@ -385,11 +387,10 @@ def texto_suspeito_para_gemini_nivel(texto, nivel="leve"):
     if len(t) < 8:
         return False
 
-    # Leve: foco principal em palavras separadas/quebradas.
+    # Leve: foco real em palavras quebradas, sem mandar frases normais inteiras para o Gemini.
     padroes_leve = [
-        r"\b[a-záàâãéêíóôõúç]{2,8}\s+[a-záàâãéêíóôõúç]{2,12}\b",
         r"\b[A-Za-zÀ-ÿ]{2,}\s*-\s+[a-záàâãéêíóôõúç]{2,}\b",
-        r"\b(lá\s*gri\s*mas|gr\s*ito|memó\s*ria|fí\s*sica|rá\s*pido|cére\s*bro|protagonis\s*ta|conse\s*guir|li\s*berdades|algu\s*mas)\b",
+        r"\b(lá\s*gri\s*mas|gr\s*ito|memó\s*ria|fí\s*sica|rá\s*pido|cére\s*bro|protagonis\s*ta|conse\s*guir|li\s*berdades|algu\s*mas|análi\s*se|lib\s*erdades|histó\s*ria|polí\s*tico)\b",
         r"\bTO\s+[a-záàâãéêíóôõúç]",
     ]
 
@@ -634,13 +635,16 @@ def revisar_epub(entrada, saida):
     epub.write_epub(str(saida), book)
 
 
-def revisar_epub_com_gemini(entrada, saida, progresso_callback=None, nivel='leve'):
+def revisar_epub_com_gemini(entrada, saida, progresso_callback=None, nivel='leve', user_id=None):
     book = epub.read_epub(str(entrada))
     docs = list(book.get_items_of_type(ITEM_DOCUMENT))
     total = len(docs) or 1
     total_corrigidos = 0
 
     for i, item in enumerate(docs, start=1):
+        if user_id is not None and user_id in cancelamentos:
+            raise Exception("Revisão cancelada.")
+
         try:
             html = item.get_content().decode("utf-8", errors="ignore")
             html, corrigidos = revisar_html_gemini(html, nivel=nivel)
@@ -832,6 +836,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Você não tem acesso ao Alma Scriptum Studio.")
         return
 
+    cancelamentos.add(user_id)
     usuarios[user_id] = {"modo": None}
 
     await update.message.reply_text(
@@ -857,6 +862,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "modo_revisar":
+        cancelamentos.discard(user_id)
         usuarios[user_id]["modo"] = "revisar"
         await query.message.reply_text(
             "🛠 Modo Revisar / Limpar EPUB\n\n"
@@ -871,6 +877,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "gemini_leve":
+        cancelamentos.discard(user_id)
         usuarios[user_id]["modo"] = "gemini"
         usuarios[user_id]["nivel_gemini"] = "leve"
         await query.message.reply_text(
@@ -883,6 +890,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "gemini_media":
+        cancelamentos.discard(user_id)
         usuarios[user_id]["modo"] = "gemini"
         usuarios[user_id]["nivel_gemini"] = "media"
         await query.message.reply_text(
@@ -895,6 +903,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "gemini_pesada":
+        cancelamentos.discard(user_id)
         usuarios[user_id]["modo"] = "gemini"
         usuarios[user_id]["nivel_gemini"] = "pesada"
         await query.message.reply_text(
@@ -908,6 +917,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "modo_imagens":
+        cancelamentos.discard(user_id)
         usuarios[user_id]["modo"] = "imagens"
         await query.message.reply_text(
             "🖼 Traduzir / trocar imagens\n\n"
@@ -916,6 +926,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "modo_capa":
+        cancelamentos.discard(user_id)
         usuarios[user_id]["modo"] = "capa"
         await query.message.reply_text(
             "🖼 Modo Editar capa\n\n"
@@ -930,10 +941,12 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif data == "conv_epub_pdf":
+        cancelamentos.discard(user_id)
         usuarios[user_id]["modo"] = "epub_pdf"
         await query.message.reply_text("📘 Envie o EPUB que deseja converter para PDF.")
 
     elif data == "conv_pdf_epub":
+        cancelamentos.discard(user_id)
         usuarios[user_id]["modo"] = "pdf_epub"
         await query.message.reply_text("📄 Envie o PDF que deseja converter para EPUB.")
 
@@ -1045,9 +1058,26 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         limpar_sessao_capa(user_id)
 
     elif data == "cancelar":
+        cancelamentos.add(user_id)
         limpar_sessao_capa(user_id)
         usuarios[user_id] = {"modo": None}
-        await query.message.reply_text("❌ Operação cancelada.")
+        await query.message.reply_text("❌ Cancelamento solicitado. Se houver revisão rodando, ela vai parar no próximo arquivo interno.")
+
+
+async def cancelar_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+
+    if not autorizado(user_id):
+        return
+
+    cancelamentos.add(user_id)
+    limpar_sessao_capa(user_id)
+    usuarios[user_id] = {"modo": None}
+
+    await update.message.reply_text(
+        "❌ Cancelamento solicitado.\n"
+        "Use /start para abrir o painel novamente."
+    )
 
 
 async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1118,7 +1148,13 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await atualizar_carregamento(msg, "🤖 Revisão com Gemini", 55, "✨ Corrigindo com IA somente onde precisa...")
 
             nivel = usuarios.get(user_id, {}).get("nivel_gemini", "leve")
-            corrigidos = revisar_epub_com_gemini(entrada, saida, nivel=nivel)
+            cancelamentos.discard(user_id)
+
+            loop = asyncio.get_running_loop()
+            corrigidos = await loop.run_in_executor(
+                None,
+                lambda: revisar_epub_com_gemini(entrada, saida, nivel=nivel, user_id=user_id)
+            )
 
             await atualizar_carregamento(msg, "🤖 Revisão com Gemini", 85, "📦 Preparando EPUB revisado...")
 
@@ -1395,6 +1431,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("cancelar", cancelar_cmd))
     app.add_handler(CallbackQueryHandler(botoes))
     app.add_handler(MessageHandler(filters.PHOTO, receber_foto))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
