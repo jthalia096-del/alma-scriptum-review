@@ -4,6 +4,7 @@ import uuid
 import time
 import json
 import shutil
+import zipfile
 import subprocess
 import asyncio
 from io import BytesIO
@@ -738,6 +739,37 @@ def salvar_imagem_temp(img):
     return caminho
 
 
+
+def limpar_epub_para_calibre(caminho_epub):
+    """
+    Remove META-INF/encryption.xml antes do Calibre.
+    Isso corrige EPUB -> PDF em livros com fonte ofuscada/proteção leve.
+    """
+    caminho_epub = Path(caminho_epub)
+
+    if caminho_epub.suffix.lower() != ".epub":
+        return caminho_epub
+
+    saida = TEMP_DIR / f"calibre_limpo_{uuid.uuid4().hex}.epub"
+
+    try:
+        with zipfile.ZipFile(caminho_epub, "r") as zin:
+            with zipfile.ZipFile(saida, "w") as zout:
+                for item in zin.infolist():
+                    nome = item.filename.replace("\\", "/").lower()
+
+                    if nome == "meta-inf/encryption.xml":
+                        continue
+
+                    dados = zin.read(item.filename)
+                    zout.writestr(item, dados)
+
+        return saida
+
+    except Exception:
+        return caminho_epub
+
+
 def ebook_convert_disponivel():
     return shutil.which("ebook-convert") is not None
     
@@ -752,8 +784,11 @@ def converter_com_calibre(entrada, saida):
     entrada = Path(entrada)
     saida = Path(saida)
 
+    entrada_convertida = entrada
+
     if entrada.suffix.lower() == ".epub":
         saida = saida.with_suffix(".pdf")
+        entrada_convertida = limpar_epub_para_calibre(entrada)
 
     elif entrada.suffix.lower() == ".pdf":
         saida = saida.with_suffix(".epub")
@@ -776,7 +811,7 @@ def converter_com_calibre(entrada, saida):
 
     base_cmd = [
         "ebook-convert",
-        str(entrada),
+        str(entrada_convertida),
         str(saida),
     ]
 
@@ -794,6 +829,12 @@ def converter_com_calibre(entrada, saida):
         timeout=1200,
         env=env,
     )
+
+    try:
+        if entrada_convertida != entrada and Path(entrada_convertida).exists():
+            Path(entrada_convertida).unlink(missing_ok=True)
+    except Exception:
+        pass
 
     if resultado.returncode != 0:
         erro = resultado.stderr[-1800:] or resultado.stdout[-1800:] or "Falha na conversão."
