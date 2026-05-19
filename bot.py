@@ -571,7 +571,7 @@ def revisar_html_simples(html):
 
     return str(soup)
 
-def revisar_html_gemini(html, nivel='leve')
+def revisar_html_gemini(html, nivel='leve'):
     soup = BeautifulSoup(html, "html.parser")
     corrigidos = 0
     chamadas = 0
@@ -634,7 +634,7 @@ def revisar_epub(entrada, saida):
     epub.write_epub(str(saida), book)
 
 
-def revisar_epub_com_gemini(entrada, saida, progresso_callback=None, nivel='leve')
+def revisar_epub_com_gemini(entrada, saida, progresso_callback=None, nivel='leve'):
     book = epub.read_epub(str(entrada))
     docs = list(book.get_items_of_type(ITEM_DOCUMENT))
     total = len(docs) or 1
