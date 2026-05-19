@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-ENV FORCE_REBUILD=2
+ENV FORCE_REBUILD=3
 ENV DISPLAY=:99
 ENV PYTHONUNBUFFERED=1
 ENV QTWEBENGINE_DISABLE_SANDBOX=1
@@ -27,6 +27,11 @@ RUN apt-get update && apt-get install -y \
     libxdamage1 \
     libxrandr2 \
     libasound2 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
