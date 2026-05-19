@@ -5,3 +5,4 @@ requests
 Pillow
 pytesseract
 deep-translator
+weasyprint
