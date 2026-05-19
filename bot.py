@@ -6,11 +6,21 @@ import json
 import shutil
 import subprocess
 import asyncio
+import base64
+import textwrap
+from io import BytesIO
 from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup, NavigableString
 from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
 
 from telegram import (
     Update,
@@ -33,8 +43,8 @@ from telegram.ext import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-MAX_GEMINI_TRECHOS = int(os.getenv("MAX_GEMINI_TRECHOS", "18"))
-GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "12"))
+MAX_GEMINI_TRECHOS = int(os.getenv("MAX_GEMINI_TRECHOS", "6"))
+GEMINI_TIMEOUT = int(os.getenv("GEMINI_TIMEOUT", "10"))
 
 IDS_LIBERADOS = {
     8672397104,
@@ -390,7 +400,7 @@ def texto_suspeito_para_gemini_nivel(texto, nivel="leve"):
     # Leve: foco real em palavras quebradas, sem mandar frases normais inteiras para o Gemini.
     padroes_leve = [
         r"\b[A-Za-zÀ-ÿ]{2,}\s*-\s+[a-záàâãéêíóôõúç]{2,}\b",
-        r"\b(lá\s*gri\s*mas|gr\s*ito|memó\s*ria|fí\s*sica|rá\s*pido|cére\s*bro|protagonis\s*ta|conse\s*guir|li\s*berdades|algu\s*mas|análi\s*se|lib\s*erdades|histó\s*ria|polí\s*tico)\b",
+        r"\b(lá\s*gri\s*mas|gr\s*ito|memó\s*ria|fí\s*sica|rá\s*pido|cére\s*bro|protagonis\s*ta|conse\s*guir|li\s*berdades|algu\s*mas|análi\s*se|lib\s*erdades|histó\s*ria|polí\s*tico|algu\s+mas|li\s+berdades)\b",
         r"\bTO\s+[a-záàâãéêíóôõúç]",
     ]
 
@@ -562,6 +572,9 @@ def revisar_html_simples(html):
         if not original:
             continue
 
+        if len(original) > MAX_CARACTERES:
+            continue
+
         novo = remover_sujeiras_texto(original)
         novo = corrigir_palavras_grudadas(novo)
         novo = limpar_texto_inteligente(novo)
@@ -576,6 +589,8 @@ def revisar_html_gemini(html, nivel='leve'):
     soup = BeautifulSoup(html, "html.parser")
     corrigidos = 0
     chamadas = 0
+
+    MAX_CARACTERES = 450
 
     blocos = soup.find_all(["p", "div", "span", "li", "blockquote"])
 
@@ -592,6 +607,9 @@ def revisar_html_gemini(html, nivel='leve'):
         original = tag.get_text(" ", strip=True)
 
         if not original:
+            continue
+
+        if len(original) > MAX_CARACTERES:
             continue
 
         novo = remover_sujeiras_texto(original)
@@ -829,6 +847,257 @@ def trocar_imagem_epub(entrada, saida, nome_imagem, nova_imagem_bytes):
     epub.write_epub(str(saida), book)
 
 
+def traduzir_texto_da_imagem_com_gemini(imagem_bytes, media_type="image/jpeg"):
+    """
+    Lê o texto da imagem com Gemini Vision e devolve tradução em PT-BR.
+    Se não achar texto, devolve vazio.
+    """
+    if not GEMINI_API_KEY or "COLE_SUA_CHAVE" in GEMINI_API_KEY:
+        return ""
+
+    imagem_b64 = base64.b64encode(imagem_bytes).decode("utf-8")
+
+    prompt = """
+Leia todo texto visível nesta imagem e traduza para português brasileiro.
+
+Regras:
+- Retorne SOMENTE o texto traduzido.
+- Não explique nada.
+- Se não houver texto legível, retorne exatamente: SEM_TEXTO
+- Não traduza nomes próprios de pessoas, cidades, países, marcas ou autora.
+- Preserve quebras de linha quando fizer sentido.
+""".strip()
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {
+                        "inline_data": {
+                            "mime_type": media_type or "image/jpeg",
+                            "data": imagem_b64,
+                        }
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.05,
+            "topP": 0.8,
+            "maxOutputTokens": 800,
+        }
+    }
+
+    try:
+        resposta = requests.post(url, json=payload, timeout=GEMINI_TIMEOUT + 10)
+        if resposta.status_code != 200:
+            return ""
+
+        dados = resposta.json()
+        partes = dados.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+        if not partes:
+            return ""
+
+        texto = partes[0].get("text", "").strip()
+        if not texto or texto.upper().strip() == "SEM_TEXTO":
+            return ""
+
+        return texto.strip()
+
+    except Exception:
+        return ""
+
+
+def cor_media_borda(imagem):
+    """
+    Pega uma cor média das bordas para criar uma faixa discreta parecida com o fundo.
+    Ajuda a manter a imagem próxima da original.
+    """
+    try:
+        img = imagem.convert("RGB")
+        w, h = img.size
+        pontos = []
+
+        for x in range(0, w, max(1, w // 20)):
+            pontos.append(img.getpixel((x, 0)))
+            pontos.append(img.getpixel((x, h - 1)))
+
+        for y in range(0, h, max(1, h // 20)):
+            pontos.append(img.getpixel((0, y)))
+            pontos.append(img.getpixel((w - 1, y)))
+
+        r = sum(p[0] for p in pontos) // len(pontos)
+        g = sum(p[1] for p in pontos) // len(pontos)
+        b = sum(p[2] for p in pontos) // len(pontos)
+        return (r, g, b)
+    except Exception:
+        return (255, 255, 255)
+
+
+def brilho_cor(cor):
+    r, g, b = cor
+    return (r * 299 + g * 587 + b * 114) / 1000
+
+
+def escolher_cor_texto(fundo):
+    return (20, 20, 20) if brilho_cor(fundo) > 150 else (235, 235, 235)
+
+
+def quebrar_texto_por_largura(draw, texto, fonte, largura_max):
+    linhas = []
+
+    for bloco in texto.splitlines():
+        bloco = bloco.strip()
+
+        if not bloco:
+            linhas.append("")
+            continue
+
+        palavras = bloco.split()
+        linha = ""
+
+        for palavra in palavras:
+            teste = palavra if not linha else linha + " " + palavra
+            try:
+                bbox = draw.textbbox((0, 0), teste, font=fonte)
+                tam = bbox[2] - bbox[0]
+            except Exception:
+                tam = len(teste) * 10
+
+            if tam <= largura_max:
+                linha = teste
+            else:
+                if linha:
+                    linhas.append(linha)
+                linha = palavra
+
+        if linha:
+            linhas.append(linha)
+
+    return linhas
+
+
+def criar_imagem_traduzida_simples(imagem_bytes, texto_traduzido):
+    """
+    Cria uma versão traduzida tentando preservar a imagem original:
+    - mantém a arte/fundo original;
+    - coloca uma faixa discreta parecida com o fundo;
+    - usa cor de texto contrastante;
+    - centraliza e ajusta o tamanho para parecer capa/página especial.
+
+    Observação: sem IA de inpainting/redraw, não dá para apagar texto original perfeito.
+    Esta versão evita destruir a imagem e fica mais parecida que uma página branca.
+    """
+    if Image is None:
+        raise Exception("A biblioteca Pillow não está instalada. Adicione Pillow no requirements.txt")
+
+    try:
+        original = Image.open(BytesIO(imagem_bytes)).convert("RGB")
+    except Exception:
+        original = Image.new("RGB", (1000, 1500), "white")
+
+    largura, altura = original.size
+    nova = original.copy()
+    draw = ImageDraw.Draw(nova, "RGBA")
+
+    texto = (texto_traduzido or "").strip()
+    if not texto:
+        texto = "Sem texto detectado"
+
+    # Área provável para capa/página especial: parte superior/central.
+    margem_x = max(28, largura // 12)
+    largura_caixa = largura - (margem_x * 2)
+
+    # Tamanho da fonte ajustável.
+    fonte_tamanho = max(22, min(72, largura // 16))
+
+    def carregar_fonte(tam):
+        for nome in ["DejaVuSerif.ttf", "DejaVuSans.ttf", "Arial.ttf"]:
+            try:
+                return ImageFont.truetype(nome, tam)
+            except Exception:
+                pass
+        return ImageFont.load_default()
+
+    fonte = carregar_fonte(fonte_tamanho)
+
+    # Reduz fonte até caber.
+    for tam in range(fonte_tamanho, 15, -2):
+        fonte = carregar_fonte(tam)
+        linhas = quebrar_texto_por_largura(draw, texto, fonte, largura_caixa)
+        bbox = draw.textbbox((0, 0), "Ag", font=fonte)
+        altura_linha = max(18, bbox[3] - bbox[1] + int(tam * 0.45))
+        altura_texto = max(altura_linha, len(linhas) * altura_linha)
+
+        if altura_texto < altura * 0.35 and len(linhas) <= 8:
+            fonte_tamanho = tam
+            break
+
+    linhas = quebrar_texto_por_largura(draw, texto, fonte, largura_caixa)
+
+    bbox = draw.textbbox((0, 0), "Ag", font=fonte)
+    altura_linha = max(18, bbox[3] - bbox[1] + int(fonte_tamanho * 0.45))
+    altura_texto = max(altura_linha, len(linhas) * altura_linha)
+
+    # Posição: tenta ficar parecida com títulos de capa/dedicatória.
+    if altura > largura * 1.25:
+        y = max(altura // 12, 40)
+    else:
+        y = max(altura // 8, 30)
+
+    padding_y = max(16, fonte_tamanho // 2)
+    caixa_y1 = max(0, y - padding_y)
+    caixa_y2 = min(altura, y + altura_texto + padding_y)
+
+    fundo = cor_media_borda(original)
+    cor_texto = escolher_cor_texto(fundo)
+
+    # Retângulo translúcido, usando cor parecida com fundo.
+    alpha = 150 if brilho_cor(fundo) > 150 else 115
+    draw.rounded_rectangle(
+        (margem_x // 2, caixa_y1, largura - margem_x // 2, caixa_y2),
+        radius=max(10, largura // 60),
+        fill=(fundo[0], fundo[1], fundo[2], alpha),
+    )
+
+    # Escrever texto centralizado.
+    y_linha = y
+    for linha in linhas:
+        try:
+            tb = draw.textbbox((0, 0), linha, font=fonte)
+            tw = tb[2] - tb[0]
+        except Exception:
+            tw = len(linha) * fonte_tamanho // 2
+
+        x = max(margem_x, (largura - tw) // 2)
+
+        # sombra leve para manter legibilidade sem ficar artificial demais
+        sombra = (0, 0, 0, 90) if brilho_cor(cor_texto) > 150 else (255, 255, 255, 70)
+        draw.text((x + 2, y_linha + 2), linha, fill=sombra, font=fonte)
+        draw.text((x, y_linha), linha, fill=cor_texto + (255,), font=fonte)
+
+        y_linha += altura_linha
+
+    buffer = BytesIO()
+    nova.save(buffer, format="JPEG", quality=94)
+    return buffer.getvalue()
+
+
+def buscar_bytes_imagem_epub(entrada, nome_imagem):
+    book = epub.read_epub(str(entrada))
+    for item in book.get_items_of_type(ITEM_IMAGE):
+        if item.file_name == nome_imagem:
+            media_type = getattr(item, "media_type", "") or "image/jpeg"
+            return item.get_content(), media_type
+    return None, None
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
@@ -976,6 +1245,54 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🗑 Imagem {indice + 1} marcada para remoção.\n\n"
             "Quando terminar de escolher, aperte 📦 Finalizar edição."
         )
+
+    elif data.startswith("traduzir_img_"):
+        indice = int(data.replace("traduzir_img_", "")) - 1
+        dados = usuarios.get(user_id, {})
+        entrada = dados.get("capa_entrada")
+        imagens = dados.get("capa_imagens", [])
+
+        if not entrada or indice < 0 or indice >= len(imagens):
+            await query.message.reply_text("⚠️ Não encontrei essa imagem. Envie o EPUB novamente.")
+            return
+
+        nome_imagem = imagens[indice]
+        msg = await query.message.reply_text("🌐 Traduzindo imagem com Gemini...")
+
+        try:
+            imagem_bytes, media_type = buscar_bytes_imagem_epub(entrada, nome_imagem)
+
+            if not imagem_bytes:
+                await msg.edit_text("⚠️ Não consegui localizar a imagem dentro do EPUB.")
+                return
+
+            texto_traduzido = traduzir_texto_da_imagem_com_gemini(imagem_bytes, media_type)
+
+            if not texto_traduzido:
+                await msg.edit_text("⚠️ Não encontrei texto legível nessa imagem ou o Gemini não respondeu.")
+                return
+
+            nova_bytes = criar_imagem_traduzida_simples(imagem_bytes, texto_traduzido)
+
+            preview = TEMP_DIR / f"imagem_traduzida_{uuid.uuid4().hex}.jpg"
+            preview.write_bytes(nova_bytes)
+
+            with open(preview, "rb") as img_file:
+                await query.message.reply_photo(
+                    photo=img_file,
+                    caption=(
+                        f"✅ Imagem {indice + 1} traduzida.\n\n"
+                        "Agora, se quiser colocar ela no EPUB, toque em 🔁 Trocar imagem na imagem original "
+                        "e envie esta imagem traduzida.\n\n"
+                        f"Texto detectado/traduzido:\n{texto_traduzido[:900]}"
+                    )
+                )
+
+            await msg.edit_text("✅ Tradução da imagem concluída. O EPUB ainda não foi alterado.")
+            preview.unlink(missing_ok=True)
+
+        except Exception as erro:
+            await query.message.reply_text(f"❌ Erro ao traduzir imagem:\n{erro}")
 
     elif data.startswith("trocar_img_"):
         indice = int(data.replace("trocar_img_", "")) - 1
@@ -1200,6 +1517,9 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             photo=img_file,
                             caption=f"🖼 Imagem {i}\nArquivo interno: {img.file_name}\n\nPara trocar/traduzir, toque em 🔁 Trocar imagem {i}.",
                             reply_markup=InlineKeyboardMarkup([
+                                [
+                                    InlineKeyboardButton(f"🌐 Traduzir imagem {i}", callback_data=f"traduzir_img_{i}"),
+                                ],
                                 [
                                     InlineKeyboardButton(f"🔁 Trocar imagem {i}", callback_data=f"trocar_img_{i}"),
                                 ],
