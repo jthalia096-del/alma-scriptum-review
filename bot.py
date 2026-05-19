@@ -863,12 +863,56 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Envie o EPUB traduzido para eu limpar sujeiras de site e organizar o texto."
         )
 
-    elif data == "modo_gemini":
-        usuarios[user_id]["modo"] = "gemini"
+    elif data == "modo_gemini_menu":
         await query.message.reply_text(
-            "🤖 Modo Revisar com Gemini\n\n"
-            "Envie o EPUB já traduzido.\n"
-            "Vou revisar trechos suspeitos, com limite para não travar e economizar cota."
+            "🤖 Revisar com Gemini\n\n"
+            "Escolha o nível da revisão:",
+            reply_markup=painel_gemini(),
+        )
+
+    elif data == "gemini_leve":
+        usuarios[user_id]["modo"] = "gemini"
+        usuarios[user_id]["nivel_gemini"] = "leve"
+        await query.message.reply_text(
+            "🟢 Revisão leve ativada.\n\n"
+            "Foco:\n"
+            "• palavras separadas\n"
+            "• palavras quebradas\n"
+            "• erros leves de espaçamento\n\n"
+            "Envie o EPUB já traduzido."
+        )
+
+    elif data == "gemini_media":
+        usuarios[user_id]["modo"] = "gemini"
+        usuarios[user_id]["nivel_gemini"] = "media"
+        await query.message.reply_text(
+            "🟡 Revisão média ativada.\n\n"
+            "Foco:\n"
+            "• palavras separadas\n"
+            "• pontuação grudada\n"
+            "• pequenos erros visuais\n\n"
+            "Envie o EPUB já traduzido."
+        )
+
+    elif data == "gemini_pesada":
+        usuarios[user_id]["modo"] = "gemini"
+        usuarios[user_id]["nivel_gemini"] = "pesada"
+        await query.message.reply_text(
+            "🔴 Revisão pesada ativada.\n\n"
+            "Foco:\n"
+            "• revisão mais forte\n"
+            "• fluidez leve\n"
+            "• erros difíceis\n\n"
+            "Sem mudar nomes próprios nem a história.\n\n"
+            "Envie o EPUB já traduzido."
+        )
+
+    elif data == "modo_imagens":
+        usuarios[user_id]["modo"] = "imagens"
+        await query.message.reply_text(
+            "🖼 Traduzir / trocar imagens\n\n"
+            "Envie o EPUB.\n"
+            "Vou mostrar as imagens encontradas para você escolher qual deseja trocar/traduzir."
         )
 
     elif data == "modo_capa":
@@ -952,7 +996,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if not remover_indices:
-            await query.message.reply_text("✅ Nenhuma imagem foi marcada para remover.")
+            await query.message.reply_text("✅ Nenhuma imagem foi marcada para remover.\n\nSe você já trocou uma imagem, o EPUB atualizado já foi enviado na troca.")
             return
 
         saida = TEMP_DIR / nome_epub(nome_original)
@@ -1261,7 +1305,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     finally:
         try:
-            if modo != "capa":
+            if modo not in ["capa", "imagens"]:
                 entrada.unlink(missing_ok=True)
 
             if saida:
