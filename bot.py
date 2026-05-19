@@ -54,7 +54,8 @@ def autorizado(user_id):
 def painel_principal():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛠 Revisar / Limpar EPUB", callback_data="modo_revisar")],
-        [InlineKeyboardButton("🤖 Revisar com Gemini", callback_data="modo_gemini")],
+        [InlineKeyboardButton("🤖 Revisar com Gemini", callback_data="modo_gemini_menu")],
+        [InlineKeyboardButton("🖼 Traduzir / trocar imagens", callback_data="modo_imagens")],
         [InlineKeyboardButton("🖼 Editar capa", callback_data="modo_capa")],
         [InlineKeyboardButton("🔄 Conversor Alma Scriptum", callback_data="modo_conversor")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")],
@@ -65,6 +66,15 @@ def painel_conversor():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📘 EPUB → PDF", callback_data="conv_epub_pdf")],
         [InlineKeyboardButton("📄 PDF → EPUB", callback_data="conv_pdf_epub")],
+        [InlineKeyboardButton("⬅️ Voltar", callback_data="voltar")],
+    ])
+
+
+def painel_gemini():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 Revisão leve", callback_data="gemini_leve")],
+        [InlineKeyboardButton("🟡 Revisão média", callback_data="gemini_media")],
+        [InlineKeyboardButton("🔴 Revisão pesada", callback_data="gemini_pesada")],
         [InlineKeyboardButton("⬅️ Voltar", callback_data="voltar")],
     ])
 
@@ -359,27 +369,124 @@ def texto_suspeito_para_gemini(texto):
 
 
 
-def gemini_revisar_trecho(texto):
-    if not GEMINI_API_KEY or "COLE_SUA_CHAVE" in GEMINI_API_KEY:
-        return remover_sujeiras_texto(texto)
 
-    prompt = f"""
-Revise APENAS o trecho abaixo em português brasileiro.
+def nivel_gemini_atual(user_id=None):
+    if user_id is None:
+        return "leve"
+    return usuarios.get(user_id, {}).get("nivel_gemini", "leve")
 
-Regras obrigatórias:
-- Não reescreva a história.
-- Não mude nomes de personagens.
-- Não traduza nomes próprios.
-- Não adicione frases novas.
-- Não remova conteúdo narrativo.
-- Corrija apenas palavras grudadas, palavras quebradas por hífen/espaço indevido, pontuação e pequenos erros visuais.
-- Corrija também letras sobrando no começo, exemplo: "TO grito" vira "O grito".
-- Se houver trecho em inglês, traduza para português brasileiro.
-- Retorne SOMENTE o texto corrigido, sem explicação.
+
+def texto_suspeito_para_gemini_nivel(texto, nivel="leve"):
+    if not texto:
+        return False
+
+    t = str(texto).strip()
+
+    if len(t) < 8:
+        return False
+
+    # Leve: foco principal em palavras separadas/quebradas.
+    padroes_leve = [
+        r"\b[a-záàâãéêíóôõúç]{2,8}\s+[a-záàâãéêíóôõúç]{2,12}\b",
+        r"\b[A-Za-zÀ-ÿ]{2,}\s*-\s+[a-záàâãéêíóôõúç]{2,}\b",
+        r"\b(lá\s*gri\s*mas|gr\s*ito|memó\s*ria|fí\s*sica|rá\s*pido|cére\s*bro|protagonis\s*ta|conse\s*guir|li\s*berdades|algu\s*mas)\b",
+        r"\bTO\s+[a-záàâãéêíóôõúç]",
+    ]
+
+    for p in padroes_leve:
+        if re.search(p, t, flags=re.I):
+            return True
+
+    if nivel in ["media", "pesada"]:
+        padroes_media = [
+            r"[a-záàâãéêíóôõúç]{3,}[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç]{2,}",
+            r"([.!?;:])([A-ZÁÀÂÃÉÊÍÓÔÕÚÇA-Za-zÀ-ÿ])",
+            r"\s{2,}",
+        ]
+
+        for p in padroes_media:
+            if re.search(p, t):
+                return True
+
+    if nivel == "pesada":
+        # Pesada também revisa trechos um pouco estranhos, mas ainda sem reescrever história.
+        if len(t) >= 50:
+            return True
+
+    return False
+
+
+def prompt_gemini_por_nivel(texto, nivel="leve"):
+    if nivel == "pesada":
+        instrucoes = """
+Você é revisor de EPUB em português brasileiro.
+
+Revise o trecho com cuidado, mas SEM reescrever a história.
+
+Pode corrigir:
+- palavras separadas indevidamente;
+- palavras quebradas por hífen/espaço;
+- pontuação;
+- espaçamento;
+- pequenos erros visuais;
+- fluidez leve quando a frase estiver estranha.
+
+Não pode:
+- mudar nomes próprios;
+- traduzir nomes de personagens, cidades, países ou marcas;
+- resumir;
+- adicionar conteúdo;
+- remover conteúdo;
+- mudar o sentido;
+- trocar palavrões por palavras suaves.
+""".strip()
+    elif nivel == "media":
+        instrucoes = """
+Você é revisor de EPUB em português brasileiro.
+
+Corrija somente:
+- palavras separadas indevidamente;
+- palavras quebradas por hífen/espaço;
+- pontuação grudada;
+- espaços errados;
+- pequenos erros visuais.
+
+Não reescreva a história.
+Não mude nomes próprios.
+Não traduza nomes de personagens, cidades, países ou marcas.
+Não adicione nem remova conteúdo.
+""".strip()
+    else:
+        instrucoes = """
+Você é revisor técnico de EPUB em português brasileiro.
+
+Corrija APENAS:
+- palavras separadas indevidamente;
+- palavras quebradas por hífen ou espaço;
+- letras soltas no começo quando for erro visual.
+
+Não corrija estilo.
+Não reescreva frases.
+Não mude nomes próprios.
+Não traduza nomes de personagens, cidades, países ou marcas.
+Não adicione nem remova conteúdo.
+""".strip()
+
+    return f"""
+{instrucoes}
+
+Retorne SOMENTE o trecho corrigido, sem explicação.
 
 Trecho:
 {texto}
 """.strip()
+
+
+def gemini_revisar_trecho(texto, nivel="leve"):
+    if not GEMINI_API_KEY or "COLE_SUA_CHAVE" in GEMINI_API_KEY:
+        return remover_sujeiras_texto(texto)
+
+    prompt = prompt_gemini_por_nivel(texto, nivel)
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
@@ -395,9 +502,9 @@ Trecho:
             }
         ],
         "generationConfig": {
-            "temperature": 0.1,
+            "temperature": 0.05 if nivel == "leve" else 0.1,
             "topP": 0.8,
-            "maxOutputTokens": 1200,
+            "maxOutputTokens": 1400,
         }
     }
 
@@ -464,7 +571,7 @@ def revisar_html_simples(html):
 
     return str(soup)
 
-def revisar_html_gemini(html):
+def revisar_html_gemini(html, nivel='leve')
     soup = BeautifulSoup(html, "html.parser")
     corrigidos = 0
     chamadas = 0
@@ -490,11 +597,11 @@ def revisar_html_gemini(html):
         novo = corrigir_palavras_grudadas(novo)
         novo = limpar_texto_inteligente(novo)
 
-        usar_gemini = texto_suspeito_para_gemini(novo) and chamadas < MAX_GEMINI_TRECHOS
+        usar_gemini = texto_suspeito_para_gemini_nivel(novo, nivel) and chamadas < MAX_GEMINI_TRECHOS
 
         if usar_gemini:
             try:
-                revisado = gemini_revisar_trecho(novo)
+                revisado = gemini_revisar_trecho(novo, nivel)
                 chamadas += 1
 
                 if (
@@ -527,7 +634,7 @@ def revisar_epub(entrada, saida):
     epub.write_epub(str(saida), book)
 
 
-def revisar_epub_com_gemini(entrada, saida, progresso_callback=None):
+def revisar_epub_com_gemini(entrada, saida, progresso_callback=None, nivel='leve')
     book = epub.read_epub(str(entrada))
     docs = list(book.get_items_of_type(ITEM_DOCUMENT))
     total = len(docs) or 1
@@ -536,7 +643,7 @@ def revisar_epub_com_gemini(entrada, saida, progresso_callback=None):
     for i, item in enumerate(docs, start=1):
         try:
             html = item.get_content().decode("utf-8", errors="ignore")
-            html, corrigidos = revisar_html_gemini(html)
+            html, corrigidos = revisar_html_gemini(html, nivel=nivel)
             total_corrigidos += corrigidos
             item.set_content(html.encode("utf-8"))
         except Exception:
@@ -562,6 +669,24 @@ def pegar_imagens_iniciais(caminho_epub, limite=3):
             escolhidas.append(img)
 
     return escolhidas[:limite]
+
+
+def pegar_todas_imagens_epub(caminho_epub, limite=30):
+    book = epub.read_epub(str(caminho_epub))
+    imagens = list(book.get_items_of_type(ITEM_IMAGE))
+
+    # Capa primeiro, depois demais.
+    imagens_ordenadas = []
+    for img in imagens:
+        nome = (img.file_name or "").lower()
+        if "cover" in nome or "capa" in nome:
+            imagens_ordenadas.append(img)
+
+    for img in imagens:
+        if img not in imagens_ordenadas:
+            imagens_ordenadas.append(img)
+
+    return imagens_ordenadas[:limite]
 
 
 def salvar_imagem_temp(img):
@@ -808,7 +933,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         usuarios[user_id]["imagem_escolhida"] = indice
 
         await query.message.reply_text(
-            "🔁 Envie agora a nova imagem da capa.\n\n"
+            "🔁 Envie agora a nova imagem traduzida.\n\n"
             "Pode mandar como foto normal."
         )
 
@@ -948,14 +1073,15 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await atualizar_carregamento(msg, "🤖 Revisão com Gemini", 35, "🔍 Procurando trechos suspeitos...")
             await atualizar_carregamento(msg, "🤖 Revisão com Gemini", 55, "✨ Corrigindo com IA somente onde precisa...")
 
-            corrigidos = revisar_epub_com_gemini(entrada, saida)
+            nivel = usuarios.get(user_id, {}).get("nivel_gemini", "leve")
+            corrigidos = revisar_epub_com_gemini(entrada, saida, nivel=nivel)
 
             await atualizar_carregamento(msg, "🤖 Revisão com Gemini", 85, "📦 Preparando EPUB revisado...")
 
             with open(saida, "rb") as f:
                 await update.message.reply_document(
                     document=InputFile(f, filename=nome_epub(nome_original)),
-                    caption=f"✅ Revisão com Gemini concluída.\n🧩 Trechos ajustados: {corrigidos}",
+                    caption=f"✅ Revisão com Gemini concluída.\n🧠 Nível: {usuarios.get(user_id, {}).get('nivel_gemini', 'leve')}\n🧩 Trechos ajustados: {corrigidos}",
                     read_timeout=180,
                     write_timeout=180,
                     connect_timeout=90,
@@ -963,6 +1089,60 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             await atualizar_carregamento(msg, "🤖 Revisão com Gemini", 100, "✅ EPUB revisado e enviado.")
+
+        elif modo == "imagens":
+            if not nome_original.lower().endswith(".epub"):
+                await update.message.reply_text("⚠️ Envie apenas EPUB para traduzir/trocar imagens.")
+                return
+
+            msg = await update.message.reply_text("🖼 Preparando imagens do EPUB...")
+            await atualizar_carregamento(msg, "🖼 Traduzir / trocar imagens", 20, "📥 EPUB recebido. Procurando imagens...")
+
+            imagens = pegar_todas_imagens_epub(entrada, limite=30)
+
+            usuarios[user_id]["capa_entrada"] = str(entrada)
+            usuarios[user_id]["capa_nome_original"] = nome_original
+            usuarios[user_id]["capa_imagens"] = [img.file_name for img in imagens]
+            usuarios[user_id]["remover_imagens"] = []
+
+            await atualizar_carregamento(msg, "🖼 Traduzir / trocar imagens", 60, f"🖼 Encontrei {len(imagens)} imagem(ns). Enviando prévias...")
+
+            if not imagens:
+                await atualizar_carregamento(msg, "🖼 Traduzir / trocar imagens", 100, "⚠️ Não encontrei imagens no EPUB.")
+                return
+
+            for i, img in enumerate(imagens, start=1):
+                img_path = salvar_imagem_temp(img)
+
+                try:
+                    with open(img_path, "rb") as img_file:
+                        await update.message.reply_photo(
+                            photo=img_file,
+                            caption=f"🖼 Imagem {i}\nArquivo interno: {img.file_name}\n\nPara trocar/traduzir, toque em 🔁 Trocar imagem {i}.",
+                            reply_markup=InlineKeyboardMarkup([
+                                [
+                                    InlineKeyboardButton(f"🔁 Trocar imagem {i}", callback_data=f"trocar_img_{i}"),
+                                ],
+                                [
+                                    InlineKeyboardButton("✅ Manter", callback_data="manter_img"),
+                                    InlineKeyboardButton("📦 Finalizar edição", callback_data="finalizar_capa"),
+                                ],
+                            ]),
+                        )
+                except Exception as erro:
+                    await update.message.reply_text(f"⚠️ Não consegui enviar a imagem {i}:\n{erro}")
+
+                finally:
+                    img_path.unlink(missing_ok=True)
+
+            await atualizar_carregamento(
+                msg,
+                "🖼 Traduzir / trocar imagens",
+                100,
+                "✅ Imagens enviadas.\n\nEscolha 🔁 Trocar na imagem desejada, envie a imagem traduzida, e depois finalize.",
+            )
+
+            return
 
         elif modo == "capa":
             if not nome_original.lower().endswith(".epub"):
@@ -1101,7 +1281,7 @@ async def receber_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     modo = usuarios.get(user_id, {}).get("modo")
 
     if modo != "aguardando_nova_capa":
-        await update.message.reply_text("⚠️ Escolha primeiro qual capa deseja trocar.")
+        await update.message.reply_text("⚠️ Escolha primeiro qual imagem deseja trocar.")
         return
 
     dados = usuarios.get(user_id, {})
@@ -1127,28 +1307,28 @@ async def receber_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🔁 Preparando troca de capa...")
 
     try:
-        await atualizar_carregamento(msg, "🔁 Trocando capa", 40, "📥 Nova imagem recebida...")
+        await atualizar_carregamento(msg, "🔁 Trocando imagem", 40, "📥 Nova imagem recebida...")
 
         with open(nova_capa, "rb") as f:
             nova_bytes = f.read()
 
-        await atualizar_carregamento(msg, "🔁 Trocando capa", 70, "🖼 Substituindo imagem escolhida...")
+        await atualizar_carregamento(msg, "🔁 Trocando imagem", 70, "🖼 Substituindo imagem escolhida...")
 
         trocar_imagem_epub(entrada, saida, nome_imagem, nova_bytes)
 
-        await atualizar_carregamento(msg, "🔁 Trocando capa", 90, "📦 Preparando EPUB atualizado...")
+        await atualizar_carregamento(msg, "🔁 Trocando imagem", 90, "📦 Preparando EPUB atualizado...")
 
         with open(saida, "rb") as f:
             await update.message.reply_document(
                 document=InputFile(f, filename=nome_epub(nome_original)),
-                caption="✅ Capa trocada e EPUB atualizado.",
+                caption="✅ Imagem trocada e EPUB atualizado.",
                 read_timeout=180,
                 write_timeout=180,
                 connect_timeout=90,
                 pool_timeout=90,
             )
 
-        await atualizar_carregamento(msg, "🔁 Trocando capa", 100, "✅ Capa trocada e enviada.")
+        await atualizar_carregamento(msg, "🔁 Trocando imagem", 100, "✅ Imagem trocada e enviada.")
 
     except Exception as erro:
         await update.message.reply_text(f"❌ Erro ao trocar capa:\n{erro}")
