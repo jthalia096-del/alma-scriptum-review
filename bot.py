@@ -6,8 +6,6 @@ import json
 import shutil
 import subprocess
 import asyncio
-import base64
-import textwrap
 from io import BytesIO
 from pathlib import Path
 
@@ -16,11 +14,23 @@ from bs4 import BeautifulSoup, NavigableString
 from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 except Exception:
     Image = None
     ImageDraw = None
     ImageFont = None
+    ImageFilter = None
+    ImageOps = None
+
+try:
+    import pytesseract
+except Exception:
+    pytesseract = None
+
+try:
+    from deep_translator import GoogleTranslator
+except Exception:
+    GoogleTranslator = None
 
 from telegram import (
     Update,
@@ -400,7 +410,7 @@ def texto_suspeito_para_gemini_nivel(texto, nivel="leve"):
     # Leve: foco real em palavras quebradas, sem mandar frases normais inteiras para o Gemini.
     padroes_leve = [
         r"\b[A-Za-zÀ-ÿ]{2,}\s*-\s+[a-záàâãéêíóôõúç]{2,}\b",
-        r"\b(lá\s*gri\s*mas|gr\s*ito|memó\s*ria|fí\s*sica|rá\s*pido|cére\s*bro|protagonis\s*ta|conse\s*guir|li\s*berdades|algu\s*mas|análi\s*se|lib\s*erdades|histó\s*ria|polí\s*tico|algu\s+mas|li\s+berdades)\b",
+        r"\b(lá\s*gri\s*mas|gr\s*ito|memó\s*ria|fí\s*sica|rá\s*pido|cére\s*bro|protagonis\s*ta|conse\s*guir|li\s*berdades|algu\s*mas|análi\s*se|lib\s*erdades|histó\s*ria|polí\s*tico)\b",
         r"\bTO\s+[a-záàâãéêíóôõúç]",
     ]
 
@@ -847,246 +857,275 @@ def trocar_imagem_epub(entrada, saida, nome_imagem, nova_imagem_bytes):
     epub.write_epub(str(saida), book)
 
 
-def traduzir_texto_da_imagem_com_gemini(imagem_bytes, media_type="image/jpeg"):
+def traduzir_texto_google_simples(texto):
     """
-    Lê o texto da imagem com Gemini Vision e devolve tradução em PT-BR.
-    Se não achar texto, devolve vazio.
+    Tradução por GoogleTranslator, sem Gemini.
+    Mantém nomes próprios naturalmente quando o tradutor não altera.
     """
-    if not GEMINI_API_KEY or "COLE_SUA_CHAVE" in GEMINI_API_KEY:
+    texto = (texto or "").strip()
+    if not texto:
         return ""
 
-    imagem_b64 = base64.b64encode(imagem_bytes).decode("utf-8")
-
-    prompt = """
-Leia todo texto visível nesta imagem e traduza para português brasileiro.
-
-Regras:
-- Retorne SOMENTE o texto traduzido.
-- Não explique nada.
-- Se não houver texto legível, retorne exatamente: SEM_TEXTO
-- Não traduza nomes próprios de pessoas, cidades, países, marcas ou autora.
-- Preserve quebras de linha quando fizer sentido.
-""".strip()
-
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    )
-
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt},
-                    {
-                        "inline_data": {
-                            "mime_type": media_type or "image/jpeg",
-                            "data": imagem_b64,
-                        }
-                    },
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.05,
-            "topP": 0.8,
-            "maxOutputTokens": 800,
-        }
-    }
+    if GoogleTranslator is None:
+        return texto
 
     try:
-        resposta = requests.post(url, json=payload, timeout=GEMINI_TIMEOUT + 10)
-        if resposta.status_code != 200:
-            return ""
-
-        dados = resposta.json()
-        partes = dados.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        if not partes:
-            return ""
-
-        texto = partes[0].get("text", "").strip()
-        if not texto or texto.upper().strip() == "SEM_TEXTO":
-            return ""
-
-        return texto.strip()
-
+        return GoogleTranslator(source="auto", target="pt").translate(texto).strip()
     except Exception:
-        return ""
+        return texto
 
 
-def cor_media_borda(imagem):
-    """
-    Pega uma cor média das bordas para criar uma faixa discreta parecida com o fundo.
-    Ajuda a manter a imagem próxima da original.
-    """
+def carregar_fonte_ajustada(tamanho):
+    if ImageFont is None:
+        return None
+
+    fontes = [
+        "DejaVuSans-Bold.ttf",
+        "DejaVuSans.ttf",
+        "Arial.ttf",
+        "arial.ttf",
+    ]
+
+    for nome in fontes:
+        try:
+            return ImageFont.truetype(nome, tamanho)
+        except Exception:
+            pass
+
+    return ImageFont.load_default()
+
+
+def cor_media_area(img, x, y, w, h):
     try:
-        img = imagem.convert("RGB")
-        w, h = img.size
-        pontos = []
-
-        for x in range(0, w, max(1, w // 20)):
-            pontos.append(img.getpixel((x, 0)))
-            pontos.append(img.getpixel((x, h - 1)))
-
-        for y in range(0, h, max(1, h // 20)):
-            pontos.append(img.getpixel((0, y)))
-            pontos.append(img.getpixel((w - 1, y)))
-
-        r = sum(p[0] for p in pontos) // len(pontos)
-        g = sum(p[1] for p in pontos) // len(pontos)
-        b = sum(p[2] for p in pontos) // len(pontos)
-        return (r, g, b)
+        crop = img.crop((x, y, x + w, y + h)).resize((1, 1))
+        return crop.getpixel((0, 0))
     except Exception:
         return (255, 255, 255)
 
 
-def brilho_cor(cor):
-    r, g, b = cor
-    return (r * 299 + g * 587 + b * 114) / 1000
+def brilho(cor):
+    try:
+        r, g, b = cor[:3]
+        return (r * 299 + g * 587 + b * 114) / 1000
+    except Exception:
+        return 255
 
 
-def escolher_cor_texto(fundo):
-    return (20, 20, 20) if brilho_cor(fundo) > 150 else (235, 235, 235)
-
-
-def quebrar_texto_por_largura(draw, texto, fonte, largura_max):
+def quebrar_texto_largura(draw, texto, fonte, largura_max):
     linhas = []
-
-    for bloco in texto.splitlines():
+    for bloco in str(texto).splitlines():
         bloco = bloco.strip()
-
         if not bloco:
-            linhas.append("")
             continue
 
         palavras = bloco.split()
-        linha = ""
+        atual = ""
 
         for palavra in palavras:
-            teste = palavra if not linha else linha + " " + palavra
+            teste = palavra if not atual else atual + " " + palavra
             try:
-                bbox = draw.textbbox((0, 0), teste, font=fonte)
-                tam = bbox[2] - bbox[0]
+                box = draw.textbbox((0, 0), teste, font=fonte)
+                tw = box[2] - box[0]
             except Exception:
-                tam = len(teste) * 10
+                tw = len(teste) * 10
 
-            if tam <= largura_max:
-                linha = teste
+            if tw <= largura_max:
+                atual = teste
             else:
-                if linha:
-                    linhas.append(linha)
-                linha = palavra
+                if atual:
+                    linhas.append(atual)
+                atual = palavra
 
-        if linha:
-            linhas.append(linha)
+        if atual:
+            linhas.append(atual)
+
+    return linhas or [texto]
+
+
+def ocr_linhas_imagem(imagem):
+    """
+    OCR local estilo Google Tradutor.
+    Precisa de pytesseract + tesseract instalado no ambiente.
+    Retorna linhas com texto e caixa aproximada.
+    """
+    if pytesseract is None:
+        raise Exception(
+            "OCR não instalado. Adicione pytesseract no requirements.txt e Tesseract no ambiente."
+        )
+
+    # Melhora leitura: aumenta, contraste e preto/branco.
+    img = imagem.convert("RGB")
+    escala = 2
+    grande = img.resize((img.width * escala, img.height * escala))
+    cinza = ImageOps.grayscale(grande)
+    cinza = ImageOps.autocontrast(cinza)
+
+    config = "--psm 6"
+    dados = pytesseract.image_to_data(
+        cinza,
+        lang="eng",
+        config=config,
+        output_type=pytesseract.Output.DICT,
+    )
+
+    grupos = {}
+
+    n = len(dados.get("text", []))
+
+    for i in range(n):
+        txt = (dados["text"][i] or "").strip()
+        conf = dados.get("conf", ["0"])[i]
+
+        try:
+            conf_val = float(conf)
+        except Exception:
+            conf_val = 0
+
+        if not txt or conf_val < 25:
+            continue
+
+        key = (
+            dados.get("block_num", [0])[i],
+            dados.get("par_num", [0])[i],
+            dados.get("line_num", [0])[i],
+        )
+
+        x = int(dados["left"][i] / escala)
+        y = int(dados["top"][i] / escala)
+        w = int(dados["width"][i] / escala)
+        h = int(dados["height"][i] / escala)
+
+        grupos.setdefault(key, []).append((txt, x, y, w, h))
+
+    linhas = []
+
+    for itens in grupos.values():
+        texto = " ".join(t[0] for t in itens).strip()
+        if not texto:
+            continue
+
+        xs = [t[1] for t in itens]
+        ys = [t[2] for t in itens]
+        x2s = [t[1] + t[3] for t in itens]
+        y2s = [t[2] + t[4] for t in itens]
+
+        x1 = max(0, min(xs) - 4)
+        y1 = max(0, min(ys) - 4)
+        x2 = min(img.width, max(x2s) + 4)
+        y2 = min(img.height, max(y2s) + 4)
+
+        # Ignora textos muito pequenos/ruído.
+        if len(texto) < 2 or (x2 - x1) < 8 or (y2 - y1) < 8:
+            continue
+
+        linhas.append({
+            "texto": texto,
+            "x": x1,
+            "y": y1,
+            "w": x2 - x1,
+            "h": y2 - y1,
+        })
 
     return linhas
 
 
-def criar_imagem_traduzida_simples(imagem_bytes, texto_traduzido):
+def criar_imagem_estilo_google_tradutor(imagem_bytes):
     """
-    Cria uma versão traduzida tentando preservar a imagem original:
-    - mantém a arte/fundo original;
-    - coloca uma faixa discreta parecida com o fundo;
-    - usa cor de texto contrastante;
-    - centraliza e ajusta o tamanho para parecer capa/página especial.
-
-    Observação: sem IA de inpainting/redraw, não dá para apagar texto original perfeito.
-    Esta versão evita destruir a imagem e fica mais parecida que uma página branca.
+    Traduz imagem sem Gemini:
+    - OCR com pytesseract;
+    - tradução com GoogleTranslator;
+    - cobre o texto original com cor média local;
+    - escreve o texto traduzido no mesmo lugar.
+    Fica parecido com Google Tradutor, dentro do possível sem o serviço oficial.
     """
     if Image is None:
-        raise Exception("A biblioteca Pillow não está instalada. Adicione Pillow no requirements.txt")
+        raise Exception("Pillow não instalado. Adicione Pillow no requirements.txt")
 
-    try:
-        original = Image.open(BytesIO(imagem_bytes)).convert("RGB")
-    except Exception:
-        original = Image.new("RGB", (1000, 1500), "white")
-
-    largura, altura = original.size
-    nova = original.copy()
+    imagem = Image.open(BytesIO(imagem_bytes)).convert("RGB")
+    nova = imagem.copy()
     draw = ImageDraw.Draw(nova, "RGBA")
 
-    texto = (texto_traduzido or "").strip()
-    if not texto:
-        texto = "Sem texto detectado"
+    linhas = ocr_linhas_imagem(imagem)
 
-    # Área provável para capa/página especial: parte superior/central.
-    margem_x = max(28, largura // 12)
-    largura_caixa = largura - (margem_x * 2)
+    if not linhas:
+        raise Exception("Não encontrei texto legível nessa imagem pelo OCR.")
 
-    # Tamanho da fonte ajustável.
-    fonte_tamanho = max(22, min(72, largura // 16))
+    traduzidas = []
 
-    def carregar_fonte(tam):
-        for nome in ["DejaVuSerif.ttf", "DejaVuSans.ttf", "Arial.ttf"]:
+    for item in linhas:
+        original = item["texto"]
+        traduzido = traduzir_texto_google_simples(original)
+
+        if not traduzido:
+            traduzido = original
+
+        x, y, w, h = item["x"], item["y"], item["w"], item["h"]
+
+        # Área um pouco maior para cobrir texto original.
+        pad = max(4, int(h * 0.35))
+        rx = max(0, x - pad)
+        ry = max(0, y - pad)
+        rw = min(nova.width - rx, w + pad * 2)
+        rh = min(nova.height - ry, h + pad * 2)
+
+        fundo = cor_media_area(imagem, rx, ry, rw, rh)
+        texto_cor = (20, 20, 20) if brilho(fundo) > 145 else (235, 235, 235)
+
+        # Cobre o texto original com retângulo suave/translúcido parecido com o fundo.
+        draw.rounded_rectangle(
+            (rx, ry, rx + rw, ry + rh),
+            radius=max(2, int(h * 0.25)),
+            fill=(fundo[0], fundo[1], fundo[2], 230),
+        )
+
+        # Tamanho da fonte baseado na altura original.
+        fonte_tam = max(10, min(60, int(h * 0.95)))
+        fonte = carregar_fonte_ajustada(fonte_tam)
+
+        # Reduz fonte se a tradução ficar grande.
+        for tam in range(fonte_tam, 8, -1):
+            fonte = carregar_fonte_ajustada(tam)
+            linhas_texto = quebrar_texto_largura(draw, traduzido, fonte, rw)
             try:
-                return ImageFont.truetype(nome, tam)
+                box = draw.textbbox((0, 0), "Ag", font=fonte)
+                lh = max(10, box[3] - box[1] + max(2, tam // 4))
             except Exception:
-                pass
-        return ImageFont.load_default()
+                lh = tam + 4
 
-    fonte = carregar_fonte(fonte_tamanho)
+            if len(linhas_texto) * lh <= rh + int(h * 0.8):
+                break
 
-    # Reduz fonte até caber.
-    for tam in range(fonte_tamanho, 15, -2):
-        fonte = carregar_fonte(tam)
-        linhas = quebrar_texto_por_largura(draw, texto, fonte, largura_caixa)
-        bbox = draw.textbbox((0, 0), "Ag", font=fonte)
-        altura_linha = max(18, bbox[3] - bbox[1] + int(tam * 0.45))
-        altura_texto = max(altura_linha, len(linhas) * altura_linha)
+        linhas_texto = quebrar_texto_largura(draw, traduzido, fonte, rw)
 
-        if altura_texto < altura * 0.35 and len(linhas) <= 8:
-            fonte_tamanho = tam
-            break
-
-    linhas = quebrar_texto_por_largura(draw, texto, fonte, largura_caixa)
-
-    bbox = draw.textbbox((0, 0), "Ag", font=fonte)
-    altura_linha = max(18, bbox[3] - bbox[1] + int(fonte_tamanho * 0.45))
-    altura_texto = max(altura_linha, len(linhas) * altura_linha)
-
-    # Posição: tenta ficar parecida com títulos de capa/dedicatória.
-    if altura > largura * 1.25:
-        y = max(altura // 12, 40)
-    else:
-        y = max(altura // 8, 30)
-
-    padding_y = max(16, fonte_tamanho // 2)
-    caixa_y1 = max(0, y - padding_y)
-    caixa_y2 = min(altura, y + altura_texto + padding_y)
-
-    fundo = cor_media_borda(original)
-    cor_texto = escolher_cor_texto(fundo)
-
-    # Retângulo translúcido, usando cor parecida com fundo.
-    alpha = 150 if brilho_cor(fundo) > 150 else 115
-    draw.rounded_rectangle(
-        (margem_x // 2, caixa_y1, largura - margem_x // 2, caixa_y2),
-        radius=max(10, largura // 60),
-        fill=(fundo[0], fundo[1], fundo[2], alpha),
-    )
-
-    # Escrever texto centralizado.
-    y_linha = y
-    for linha in linhas:
         try:
-            tb = draw.textbbox((0, 0), linha, font=fonte)
-            tw = tb[2] - tb[0]
+            box = draw.textbbox((0, 0), "Ag", font=fonte)
+            lh = max(10, box[3] - box[1] + max(2, fonte_tam // 5))
         except Exception:
-            tw = len(linha) * fonte_tamanho // 2
+            lh = fonte_tam + 4
 
-        x = max(margem_x, (largura - tw) // 2)
+        total_h = len(linhas_texto) * lh
+        ty = ry + max(0, (rh - total_h) // 2)
 
-        # sombra leve para manter legibilidade sem ficar artificial demais
-        sombra = (0, 0, 0, 90) if brilho_cor(cor_texto) > 150 else (255, 255, 255, 70)
-        draw.text((x + 2, y_linha + 2), linha, fill=sombra, font=fonte)
-        draw.text((x, y_linha), linha, fill=cor_texto + (255,), font=fonte)
+        for linha in linhas_texto:
+            try:
+                tb = draw.textbbox((0, 0), linha, font=fonte)
+                tw = tb[2] - tb[0]
+            except Exception:
+                tw = len(linha) * fonte_tam // 2
 
-        y_linha += altura_linha
+            tx = rx + max(0, (rw - tw) // 2)
+
+            # sombra leve
+            sombra = (0, 0, 0, 80) if brilho(texto_cor) > 145 else (255, 255, 255, 80)
+            draw.text((tx + 1, ty + 1), linha, fill=sombra, font=fonte)
+            draw.text((tx, ty), linha, fill=texto_cor + (255,), font=fonte)
+            ty += lh
+
+        traduzidas.append(f"{original} → {traduzido}")
 
     buffer = BytesIO()
     nova.save(buffer, format="JPEG", quality=94)
-    return buffer.getvalue()
+    return buffer.getvalue(), traduzidas
 
 
 def buscar_bytes_imagem_epub(entrada, nome_imagem):
@@ -1257,7 +1296,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         nome_imagem = imagens[indice]
-        msg = await query.message.reply_text("🌐 Traduzindo imagem com Gemini...")
+        msg = await query.message.reply_text("🌐 Traduzindo imagem no estilo Google Tradutor...")
 
         try:
             imagem_bytes, media_type = buscar_bytes_imagem_epub(entrada, nome_imagem)
@@ -1266,25 +1305,27 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.edit_text("⚠️ Não consegui localizar a imagem dentro do EPUB.")
                 return
 
-            texto_traduzido = traduzir_texto_da_imagem_com_gemini(imagem_bytes, media_type)
-
-            if not texto_traduzido:
-                await msg.edit_text("⚠️ Não encontrei texto legível nessa imagem ou o Gemini não respondeu.")
-                return
-
-            nova_bytes = criar_imagem_traduzida_simples(imagem_bytes, texto_traduzido)
+            loop = asyncio.get_running_loop()
+            nova_bytes, traducoes = await loop.run_in_executor(
+                None,
+                lambda: criar_imagem_estilo_google_tradutor(imagem_bytes)
+            )
 
             preview = TEMP_DIR / f"imagem_traduzida_{uuid.uuid4().hex}.jpg"
             preview.write_bytes(nova_bytes)
+
+            resumo = "\n".join(traducoes[:8])
+            if len(resumo) > 900:
+                resumo = resumo[:900] + "..."
 
             with open(preview, "rb") as img_file:
                 await query.message.reply_photo(
                     photo=img_file,
                     caption=(
-                        f"✅ Imagem {indice + 1} traduzida.\n\n"
-                        "Agora, se quiser colocar ela no EPUB, toque em 🔁 Trocar imagem na imagem original "
-                        "e envie esta imagem traduzida.\n\n"
-                        f"Texto detectado/traduzido:\n{texto_traduzido[:900]}"
+                        f"✅ Imagem {indice + 1} traduzida no estilo Google Tradutor.\n\n"
+                        "O EPUB ainda NÃO foi alterado.\n"
+                        "Se gostar, toque em 🔁 Trocar imagem e envie esta imagem traduzida.\n\n"
+                        f"Trechos:\n{resumo}"
                     )
                 )
 
@@ -1292,7 +1333,11 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             preview.unlink(missing_ok=True)
 
         except Exception as erro:
-            await query.message.reply_text(f"❌ Erro ao traduzir imagem:\n{erro}")
+            await query.message.reply_text(
+                "❌ Não consegui traduzir essa imagem automaticamente.\n\n"
+                f"Motivo: {erro}\n\n"
+                "Dica: imagens com texto muito pequeno/escuro podem precisar de edição manual ou OCR melhor."
+            )
 
     elif data.startswith("trocar_img_"):
         indice = int(data.replace("trocar_img_", "")) - 1
@@ -1739,6 +1784,78 @@ async def receber_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         limpar_sessao_capa(user_id)
 
 
+async def receber_documento_imagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+
+    modo = usuarios.get(user_id, {}).get("modo")
+
+    if modo != "aguardando_nova_capa":
+        return await receber_arquivo(update, context)
+
+    documento = update.message.document
+
+    if not documento:
+        return
+
+    mime = getattr(documento, "mime_type", "") or ""
+    nome = documento.file_name or ""
+
+    if not (mime.startswith("image/") or nome.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
+        await update.message.reply_text("⚠️ Envie uma imagem para trocar.")
+        return
+
+    dados = usuarios.get(user_id, {})
+    entrada = dados.get("capa_entrada")
+    imagens = dados.get("capa_imagens", [])
+    indice = dados.get("imagem_escolhida")
+    nome_original = dados.get("capa_nome_original", "Livro.epub")
+
+    if not entrada or indice is None or indice < 0 or indice >= len(imagens):
+        await update.message.reply_text("⚠️ Não encontrei o EPUB base. Envie novamente.")
+        return
+
+    nome_imagem = imagens[indice]
+
+    arquivo = await documento.get_file()
+    nova_capa = TEMP_DIR / f"nova_imagem_{uuid.uuid4().hex}_{nome}"
+    await arquivo.download_to_drive(str(nova_capa))
+
+    saida = TEMP_DIR / nome_epub(nome_original)
+    msg = await update.message.reply_text("🔁 Preparando troca de imagem...")
+
+    try:
+        await atualizar_carregamento(msg, "🔁 Trocando imagem", 40, "📥 Nova imagem recebida...")
+
+        with open(nova_capa, "rb") as f:
+            nova_bytes = f.read()
+
+        await atualizar_carregamento(msg, "🔁 Trocando imagem", 70, "🖼 Substituindo imagem escolhida...")
+
+        trocar_imagem_epub(entrada, saida, nome_imagem, nova_bytes)
+
+        await atualizar_carregamento(msg, "🔁 Trocando imagem", 90, "📦 Preparando EPUB atualizado...")
+
+        with open(saida, "rb") as f:
+            await update.message.reply_document(
+                document=InputFile(f, filename=nome_epub(nome_original)),
+                caption="✅ Imagem trocada e EPUB atualizado.",
+                read_timeout=180,
+                write_timeout=180,
+                connect_timeout=90,
+                pool_timeout=90,
+            )
+
+        await atualizar_carregamento(msg, "🔁 Trocando imagem", 100, "✅ Imagem trocada e enviada.")
+
+    except Exception as erro:
+        await update.message.reply_text(f"❌ Erro ao trocar imagem:\n{erro}")
+
+    finally:
+        nova_capa.unlink(missing_ok=True)
+        saida.unlink(missing_ok=True)
+        limpar_sessao_capa(user_id)
+
+
 def main():
     app = (
         ApplicationBuilder()
@@ -1754,7 +1871,7 @@ def main():
     app.add_handler(CommandHandler("cancelar", cancelar_cmd))
     app.add_handler(CallbackQueryHandler(botoes))
     app.add_handler(MessageHandler(filters.PHOTO, receber_foto))
-    app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
+    app.add_handler(MessageHandler(filters.Document.ALL, receber_documento_imagem))
 
     print("✅ Alma Scriptum Studio ONLINE")
     app.run_polling()
