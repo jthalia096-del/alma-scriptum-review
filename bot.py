@@ -762,17 +762,30 @@ def converter_com_calibre(entrada, saida):
         raise Exception("Formato não suportado. Use apenas EPUB ou PDF.")
 
     env = os.environ.copy()
+
+    # Correções para Railway/servidor sem tela/GPU.
     env["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
-    env["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu"
+    env["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu --disable-software-rasterizer"
     env["QT_QPA_PLATFORM"] = "offscreen"
     env["QT_QUICK_BACKEND"] = "software"
+    env["QT_OPENGL"] = "software"
+    env["QT_XCB_GL_INTEGRATION"] = "none"
     env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+    env["MESA_LOADER_DRIVER_OVERRIDE"] = "llvmpipe"
+    env["XDG_RUNTIME_DIR"] = str(TEMP_DIR)
 
-    comando = [
+    base_cmd = [
         "ebook-convert",
         str(entrada),
         str(saida),
     ]
+
+    # Em servidor sem display, o Calibre às vezes só funciona com xvfb-run.
+    xvfb = shutil.which("xvfb-run")
+    if xvfb:
+        comando = [xvfb, "-a", "--server-args=-screen 0 1024x768x24"] + base_cmd
+    else:
+        comando = base_cmd
 
     resultado = subprocess.run(
         comando,
@@ -783,11 +796,16 @@ def converter_com_calibre(entrada, saida):
     )
 
     if resultado.returncode != 0:
-        raise Exception(
-            resultado.stderr[-1500:]
-            or resultado.stdout[-1500:]
-            or "Falha na conversão."
-        )
+        erro = resultado.stderr[-1800:] or resultado.stdout[-1800:] or "Falha na conversão."
+
+        if "QVulkanInstance" in erro or "Vulkan" in erro or "GPU vendor" in erro:
+            erro = (
+                "Erro do Calibre no servidor sem GPU/tela. "
+                "Precisa instalar dependências gráficas no Dockerfile: xvfb, libegl1, libgl1, libopengl0, libxcb-cursor0.\\n\\n"
+                + erro
+            )
+
+        raise Exception(erro)
 
 
 def limpar_sessao_capa(user_id):
@@ -950,83 +968,116 @@ def ocr_linhas_imagem(imagem):
     """
     if pytesseract is None:
         raise Exception(
-            "OCR não instalado. Adicione pytesseract no requirements.txt e Tesseract no ambiente."
+            "OCR não instalado. Adicione pytesseract no requirements.txt e Tesseract no Dockerfile."
         )
 
-    # Melhora leitura: aumenta, contraste e preto/branco.
     img = imagem.convert("RGB")
-    escala = 2
-    grande = img.resize((img.width * escala, img.height * escala))
-    cinza = ImageOps.grayscale(grande)
-    cinza = ImageOps.autocontrast(cinza)
 
-    config = "--psm 6"
-    dados = pytesseract.image_to_data(
-        cinza,
-        lang="eng",
-        config=config,
-        output_type=pytesseract.Output.DICT,
-    )
+    tentativas = [
+        {"escala": 3, "psm": 6, "conf": 12},
+        {"escala": 4, "psm": 6, "conf": 8},
+        {"escala": 3, "psm": 11, "conf": 8},
+        {"escala": 4, "psm": 11, "conf": 5},
+    ]
 
-    grupos = {}
+    melhor = []
 
-    n = len(dados.get("text", []))
+    for tentativa in tentativas:
+        escala = tentativa["escala"]
+        psm = tentativa["psm"]
+        conf_min = tentativa["conf"]
 
-    for i in range(n):
-        txt = (dados["text"][i] or "").strip()
-        conf = dados.get("conf", ["0"])[i]
+        grande = img.resize((img.width * escala, img.height * escala))
+        cinza = ImageOps.grayscale(grande)
+        cinza = ImageOps.autocontrast(cinza)
+
+        # Aumenta contraste para textos pequenos/escuros.
+        try:
+            cinza = cinza.point(lambda p: 255 if p > 145 else 0)
+        except Exception:
+            pass
+
+        config = f"--psm {psm}"
 
         try:
-            conf_val = float(conf)
-        except Exception:
-            conf_val = 0
+            dados = pytesseract.image_to_data(
+                cinza,
+                lang="eng",
+                config=config,
+                output_type=pytesseract.Output.DICT,
+            )
+        except Exception as erro:
+            raise Exception(f"OCR falhou. Verifique se o Tesseract está instalado no Dockerfile. Detalhe: {erro}")
 
-        if not txt or conf_val < 25:
-            continue
+        grupos = {}
+        n = len(dados.get("text", []))
 
-        key = (
-            dados.get("block_num", [0])[i],
-            dados.get("par_num", [0])[i],
-            dados.get("line_num", [0])[i],
-        )
+        for i in range(n):
+            txt = (dados["text"][i] or "").strip()
+            conf = dados.get("conf", ["0"])[i]
 
-        x = int(dados["left"][i] / escala)
-        y = int(dados["top"][i] / escala)
-        w = int(dados["width"][i] / escala)
-        h = int(dados["height"][i] / escala)
+            try:
+                conf_val = float(conf)
+            except Exception:
+                conf_val = 0
 
-        grupos.setdefault(key, []).append((txt, x, y, w, h))
+            if not txt or conf_val < conf_min:
+                continue
 
-    linhas = []
+            # filtra ruído puro
+            if not re.search(r"[A-Za-z]", txt):
+                continue
 
-    for itens in grupos.values():
-        texto = " ".join(t[0] for t in itens).strip()
-        if not texto:
-            continue
+            key = (
+                dados.get("block_num", [0])[i],
+                dados.get("par_num", [0])[i],
+                dados.get("line_num", [0])[i],
+            )
 
-        xs = [t[1] for t in itens]
-        ys = [t[2] for t in itens]
-        x2s = [t[1] + t[3] for t in itens]
-        y2s = [t[2] + t[4] for t in itens]
+            x = int(dados["left"][i] / escala)
+            y = int(dados["top"][i] / escala)
+            w = max(1, int(dados["width"][i] / escala))
+            h = max(1, int(dados["height"][i] / escala))
 
-        x1 = max(0, min(xs) - 4)
-        y1 = max(0, min(ys) - 4)
-        x2 = min(img.width, max(x2s) + 4)
-        y2 = min(img.height, max(y2s) + 4)
+            grupos.setdefault(key, []).append((txt, x, y, w, h))
 
-        # Ignora textos muito pequenos/ruído.
-        if len(texto) < 2 or (x2 - x1) < 8 or (y2 - y1) < 8:
-            continue
+        linhas = []
 
-        linhas.append({
-            "texto": texto,
-            "x": x1,
-            "y": y1,
-            "w": x2 - x1,
-            "h": y2 - y1,
-        })
+        for itens in grupos.values():
+            texto = " ".join(t[0] for t in itens).strip()
+            texto = re.sub(r"\s+", " ", texto)
 
-    return linhas
+            if not texto or len(texto) < 2:
+                continue
+
+            xs = [t[1] for t in itens]
+            ys = [t[2] for t in itens]
+            x2s = [t[1] + t[3] for t in itens]
+            y2s = [t[2] + t[4] for t in itens]
+
+            x1 = max(0, min(xs) - 6)
+            y1 = max(0, min(ys) - 6)
+            x2 = min(img.width, max(x2s) + 6)
+            y2 = min(img.height, max(y2s) + 6)
+
+            if (x2 - x1) < 8 or (y2 - y1) < 8:
+                continue
+
+            linhas.append({
+                "texto": texto,
+                "x": x1,
+                "y": y1,
+                "w": x2 - x1,
+                "h": y2 - y1,
+            })
+
+        if len(linhas) > len(melhor):
+            melhor = linhas
+
+        if len(melhor) >= 2:
+            break
+
+    return melhor
 
 
 def criar_imagem_estilo_google_tradutor(imagem_bytes):
