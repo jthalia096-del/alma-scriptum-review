@@ -1,7 +1,6 @@
-python-telegram-bot==22.7
-EbookLib==0.20
-beautifulsoup4==4.12.3
-lxml
+python-telegram-bot==20.8
+ebooklib
+beautifulsoup4
 requests
 Pillow
 pytesseract
