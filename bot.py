@@ -810,9 +810,13 @@ def converter_com_calibre(entrada, saida):
     env["XDG_RUNTIME_DIR"] = str(TEMP_DIR)
 
     base_cmd = [
+        "xvfb-run",
+        "-a",
         "ebook-convert",
         str(entrada_convertida),
         str(saida),
+        "--pdf-page-numbers",
+        "--disable-font-rescaling",
     ]
 
     # Em servidor sem display, o Calibre às vezes só funciona com xvfb-run.
