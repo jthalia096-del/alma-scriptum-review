@@ -3,3 +3,6 @@ EbookLib==0.20
 beautifulsoup4==4.12.3
 lxml
 requests
+Pillow
+pytesseract
+deep-translator
