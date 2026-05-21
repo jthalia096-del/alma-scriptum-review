@@ -281,7 +281,7 @@ def ambiente_calibre():
     return env
 
 
-def rodar_calibre(entrada, saida, formato_saida, timeout=3600):
+def rodar_calibre(entrada, saida, formato_saida, timeout=1800):
     if not ebook_convert_disponivel():
         raise Exception("O comando ebook-convert do Calibre não foi encontrado.")
     entrada = Path(entrada)
@@ -290,7 +290,16 @@ def rodar_calibre(entrada, saida, formato_saida, timeout=3600):
     comando_base = ["ebook-convert", str(entrada_convertida), str(saida)]
     formato_saida = formato_saida.lower()
     if formato_saida == "pdf":
-        comando_base += ["--pdf-page-numbers", "--paper-size", "a5", "--margin-left", "36", "--margin-right", "36", "--margin-top", "36", "--margin-bottom", "36", "--disable-font-rescaling"]
+        comando_base += [
+    "--paper-size", "a5",
+    "--margin-left", "28",
+    "--margin-right", "28",
+    "--margin-top", "28",
+    "--margin-bottom", "28",
+    "--disable-font-rescaling",
+    "--linearize-tables",
+    "--pdf-add-toc"
+]
     elif formato_saida in ["epub", "mobi", "azw3", "fb2", "lit", "lrf", "pdb", "rb", "snb", "tcr", "txtz", "htmlz", "kepub"]:
         comando_base += ["--disable-font-rescaling", "--chapter-mark", "none", "--page-breaks-before", "/"]
     xvfb = shutil.which("xvfb-run")
