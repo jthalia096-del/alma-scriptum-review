@@ -5,19 +5,10 @@ import shutil
 import zipfile
 import subprocess
 import asyncio
-from io import BytesIO
 from pathlib import Path
 
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup
 from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
-
-try:
-    from PIL import Image, ImageDraw, ImageFont, ImageOps
-except Exception:
-    Image = None
-    ImageDraw = None
-    ImageFont = None
-    ImageOps = None
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.error import TimedOut, NetworkError
@@ -77,7 +68,7 @@ def autorizado(user_id):
 def painel_principal():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Conversor Alma Scriptum", callback_data="modo_conversor")],
-                [InlineKeyboardButton("🖼 Editar capa", callback_data="modo_capa")],
+        [InlineKeyboardButton("🖼 Editar capa", callback_data="modo_capa")],
         [InlineKeyboardButton("🛠 Limpar EPUB", callback_data="modo_revisar")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")],
     ])
@@ -152,147 +143,196 @@ def nome_epub(nome):
     return f"{limpar_nome(nome)} - Studio - Alma Scriptum.epub"
 
 
-def remover_sujeiras_texto(texto):
+
+async def converter_com_progresso(entrada, saida, formato_saida, msg, formato_entrada):
+    tarefa = asyncio.create_task(asyncio.to_thread(rodar_calibre, entrada, saida, formato_saida))
+
+    progresso = 45
+    tempo_total = 0
+
+    while not tarefa.done():
+        await asyncio.sleep(15)
+        tempo_total += 15
+
+        if tarefa.done():
+            break
+
+        if progresso < 82:
+            progresso += 4
+
+        await atualizar_carregamento(
+            msg,
+            "🔄 Conversor Alma Scriptum",
+            progresso,
+            f"⚙️ Convertendo {str(formato_entrada).upper()} para {str(formato_saida).upper()}...
+
+"
+            f"⏳ Calibre trabalhando há {tempo_total}s.
+"
+            "Se passar de 10 minutos, eu paro e aviso."
+        )
+
+    return await tarefa
+
+
+
+
+
+def texto_de_sujeira(texto):
+    if not texto:
+        return False
+
+    t = str(texto).strip()
+    compact = re.sub(r"\s+", "", t).lower()
+
+    padroes = [
+        "oceanofpdf", "oceanpdf", "oceanofbooks",
+        "z-library", "zlibrary", "z-lib", "1lib", "libgen",
+        "wattpad.com", "img.wattpad.com",
+        "annas-archive", "anna's archive", "vk.com",
+        "t.me/", "telegram.me/", "discord.gg",
+        "uploaded by", "shared by", "downloaded from",
+        "free ebook", "ebook hunter", "bookfrom.net",
+    ]
+
+    if any(p in compact for p in padroes):
+        return True
+
+    if re.search(r"https?://", t, flags=re.I):
+        return True
+
+    if re.search(r"www\.", t, flags=re.I):
+        return True
+
+    if re.search(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", t, flags=re.I):
+        return True
+
+    if re.search(r"[a-z0-9]{45,}", compact, flags=re.I):
+        return True
+
+    return False
+
+
+def limpar_texto_pesado(texto):
     if not texto:
         return texto
-    texto = str(texto).replace("\u00ad", "")
-    texto = texto.replace("‐", "-").replace("‑", "-").replace("–", "—")
+
+    texto = str(texto)
+
     padroes = [
-        r"OceanofPDF\.com", r"OceanOfPDF\.com", r"OceanPDF\.com",
-        r"oceanofpdf\.com", r"oceanofpdf", r"Ocean Of PDF", r"Ocean PDF",
-        r"z-library\.sk", r"z-library", r"zlib", r"1lib\.sk", r"1lib",
-        r"z-lib\.org", r"z-lib",
+        r"Ocean\s*of\s*PDF\.?\s*com",
+        r"OceanofPDF\.?\s*com",
+        r"OceanPDF\.?\s*com",
+        r"OceanofPDF",
+        r"Ocean\s*PDF",
+        r"z[\s\-_]*library(?:\.sk|\.org)?",
+        r"z[\s\-_]*lib(?:\.org)?",
+        r"1lib(?:\.sk|\.org)?",
+        r"libgen(?:\.is|\.rs)?",
+        r"anna['’]?s[\s\-_]*archive",
+        r"wattpad\.com/\S+",
+        r"img\.wattpad\.com/\S+",
+        r"https?://\S+",
+        r"www\.\S+",
+        r"t\.me/\S+",
+        r"telegram\.me/\S+",
+        r"discord\.gg/\S+",
+        r"uploaded\s+by\s*:?\s*\S+",
+        r"shared\s+by\s*:?\s*\S+",
+        r"downloaded\s+from\s*:?\s*\S+",
     ]
+
     for p in padroes:
         texto = re.sub(p, "", texto, flags=re.I)
-    correcoes = {
-        "deTODOS.Cada": "de TODOS. Cada", "deTODOS": "de TODOS", "TODOS.Cada": "TODOS. Cada",
-        "processo.A": "processo. A", "trama.Bruxas": "trama. Bruxas", "Sériemas": "Série, mas",
-        "sérieSons": "série Sons", "passaapós": "passa após", "4Playda": "4Play da",
-        "completaPara": "completa. Para", "umaexperiência": "uma experiência",
-        "cinematográficacompleta": "cinematográfica completa", "completaincluindo": "completa incluindo",
-        "sitewww": "site www", "meu sitewww": "meu site www", "paraaNo": "para a No", "paraaNa": "para a Na",
-        "tambémpara": "também para", "quememória": "que memória", "quememoria": "que memória",
-        "bemEspero": "bem? Espero", "físicaSem": "física. Sem", "fisicaSem": "física. Sem",
-        "físicasem": "física. Sem", "semviolência": "sem violência", "semviolencia": "sem violência",
-        "lágri mas": "lágrimas", "lá gri mas": "lágrimas", "gr ito": "grito",
-        "TO grito": "O grito", "TO gr ito": "O grito", "T O grito": "O grito",
-        "memó ria": "memória", "fí sica": "física", "rá pido": "rápido", "cére bro": "cérebro",
-        "conse guir": "conseguir", "sozin has": "sozinhas",
-    }
-    for errado, certo in correcoes.items():
-        texto = texto.replace(errado, certo)
-    texto = re.sub(r"([A-Za-zÀ-ÿ]{2,})-\s+([a-záàâãéêíóôõúç]{2,})", r"\1\2", texto)
-    texto = re.sub(r"(^|[.!?]\s+)T\s*O\s+([a-záàâãéêíóôõúç])", r"\1O \2", texto)
-    texto = re.sub(r"(^|[.!?]\s+)T\s*A\s+([a-záàâãéêíóôõúç])", r"\1A \2", texto)
-    texto = re.sub(r"([a-záàâãéêíóôõúç])([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç]{2,})", r"\1 \2", texto)
-    texto = re.sub(r"([.!?;:])([A-ZÁÀÂÃÉÊÍÓÔÕÚÇA-Za-zÀ-ÿ])", r"\1 \2", texto)
-    texto = re.sub(r"\blá\s*gri\s*mas\b", "lágrimas", texto, flags=re.I)
-    texto = re.sub(r"\bgr\s*ito\b", "grito", texto, flags=re.I)
-    texto = re.sub(r"\bmemó\s*ria\b", "memória", texto, flags=re.I)
-    texto = re.sub(r"\bfí\s*sica\b", "física", texto, flags=re.I)
-    texto = re.sub(r"\brá\s*pido\b", "rápido", texto, flags=re.I)
-    texto = re.sub(r"\bcére\s*bro\b", "cérebro", texto, flags=re.I)
-    texto = re.sub(r"\bconse\s*guir\b", "conseguir", texto, flags=re.I)
-    texto = re.sub(r"\bsozin\s*has\b", "sozinhas", texto, flags=re.I)
+
+    texto = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "", texto)
+    texto = re.sub(r"\b[A-Za-z0-9]{45,}\b", "", texto)
     texto = re.sub(r"\s+([,.!?;:])", r"\1", texto)
     texto = re.sub(r"\s{2,}", " ", texto)
-    texto = texto.replace("sitewww.", "site www.").replace("www. ", "www.").replace(". com", ".com")
+
     return texto.strip()
 
 
-def limpar_links_sujos_wattpad(soup):
-    """
-    Remove links soltos de imagem/site dentro do EPUB.
-    Pega também quando o link vem quebrado em pedaços pequenos:
-    https://img.
-    wattpad.com/cover/...
-    """
-    padroes_url = [
-        "img.wattpad.com",
-        "wattpad.com/cover",
-        "wattpad.com/",
-        "https://img.",
-        "http://img.",
-        "/cover/",
-    ]
-
-    # Remove tags inteiras que sejam basicamente links.
-    for tag in soup.find_all(["p", "div", "span", "a", "font"]):
-        texto = tag.get_text(" ", strip=True)
-        if not texto:
-            continue
-
-        t = texto.lower().replace(" ", "")
-
-        if any(p in t for p in padroes_url):
-            tag.decompose()
-            continue
-
-        if ("http://" in t or "https://" in t) and len(t) > 25:
-            tag.decompose()
-            continue
-
-        if re.search(r"[a-z0-9]{20,}", t, flags=re.I):
-            tag.decompose()
-            continue
-
-    # Remove nós de texto soltos com pedaços de URL.
-    for node in list(soup.find_all(string=True)):
-        texto = str(node)
-        t = texto.lower().replace(" ", "")
-
-        if any(p in t for p in padroes_url):
-            node.extract()
-            continue
-
-        if ("http://" in t or "https://" in t) and len(t) > 25:
-            node.extract()
-            continue
-
-        if re.search(r"[a-z0-9]{35,}", t, flags=re.I):
-            node.extract()
-
-    return soup
-
-
-
-def revisar_html_simples(html):
+def limpar_html_pesado(html):
     soup = BeautifulSoup(html, "html.parser")
-    soup = limpar_links_sujos_wattpad(soup)
-    for node in soup.find_all(string=True):
-        if node.parent and node.parent.name in ["script", "style", "code", "pre", "head", "title"]:
+
+    for tag in soup.find_all(["script", "noscript"]):
+        tag.decompose()
+
+    for tag in list(soup.find_all(["p", "div", "span", "a", "font", "center", "small", "em", "i", "b", "strong"])):
+        texto = tag.get_text(" ", strip=True)
+
+        if texto_de_sujeira(texto):
+            tag.decompose()
             continue
+
+        attrs = " ".join(str(v) for v in tag.attrs.values())
+        if texto_de_sujeira(attrs):
+            tag.decompose()
+            continue
+
+    for tag in list(soup.find_all(["a", "img", "image", "source"])):
+        attrs = " ".join(str(v) for v in tag.attrs.values())
+        if texto_de_sujeira(attrs):
+            tag.decompose()
+
+    for node in list(soup.find_all(string=True)):
+        parent = getattr(node, "parent", None)
+        parent_name = getattr(parent, "name", "") if parent else ""
+
         original = str(node)
-        if not original.strip():
+
+        if parent_name in ["style"]:
+            novo_css = limpar_texto_pesado(original)
+            node.replace_with(NavigableString(novo_css))
             continue
-        novo = remover_sujeiras_texto(original)
-        if novo and novo != original.strip():
-            node.replace_with(NavigableString(novo))
+
+        if texto_de_sujeira(original):
+            node.extract()
+            continue
+
+        novo = limpar_texto_pesado(original)
+
+        if novo != original:
+            if novo.strip():
+                node.replace_with(NavigableString(novo))
+            else:
+                node.extract()
+
     return str(soup)
 
 
-def revisar_epub(entrada, saida):
-    book = epub.read_epub(str(entrada))
+def limpar_epub_rapido(entrada, saida):
     alterados = 0
 
-    for item in book.get_items_of_type(ITEM_DOCUMENT):
-        try:
-            html = item.get_content().decode("utf-8", errors="ignore")
-            novo_html = revisar_html_simples(html)
+    with zipfile.ZipFile(entrada, "r") as zin:
+        with zipfile.ZipFile(saida, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                nome = item.filename.lower()
 
-            if novo_html != html:
-                alterados += 1
-                item.set_content(novo_html.encode("utf-8"))
-        except Exception:
-            pass
+                if nome.endswith((".html", ".xhtml", ".htm", ".xml", ".opf", ".ncx", ".css")):
+                    try:
+                        texto = data.decode("utf-8", errors="ignore")
+                        if nome.endswith((".html", ".xhtml", ".htm", ".xml", ".opf", ".ncx")):
+                            novo = limpar_html_pesado(texto)
+                        else:
+                            novo = limpar_texto_pesado(texto)
 
-    epub.write_epub(str(saida), book)
+                        if novo != texto:
+                            alterados += 1
+                            data = novo.encode("utf-8")
+                    except Exception:
+                        pass
+
+                zout.writestr(item, data)
 
     if not Path(saida).exists() or Path(saida).stat().st_size == 0:
         raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
 
     return alterados
+
+
 
 
 def ebook_convert_disponivel():
@@ -331,7 +371,7 @@ def ambiente_calibre():
     return env
 
 
-def rodar_calibre(entrada, saida, formato_saida, timeout=900):
+def rodar_calibre(entrada, saida, formato_saida, timeout=600):
     if not ebook_convert_disponivel():
         raise Exception("O comando ebook-convert do Calibre não foi encontrado.")
     entrada = Path(entrada)
@@ -340,16 +380,14 @@ def rodar_calibre(entrada, saida, formato_saida, timeout=900):
     comando_base = ["ebook-convert", str(entrada_convertida), str(saida)]
     formato_saida = formato_saida.lower()
     if formato_saida == "pdf":
-        # PDF rápido: opções mínimas para o Railway não travar.
         comando_base += [
             "--paper-size", "a5",
-            "--margin-left", "20",
-            "--margin-right", "20",
-            "--margin-top", "20",
-            "--margin-bottom", "20",
+            "--margin-left", "18",
+            "--margin-right", "18",
+            "--margin-top", "18",
+            "--margin-bottom", "18",
         ]
     elif formato_saida in ["epub", "mobi", "azw3", "fb2", "lit", "lrf", "pdb", "rb", "snb", "tcr", "txtz", "htmlz", "kepub", "kfx"]:
-        # Conversão rápida: sem opções extras pesadas.
         comando_base += [
             "--chapter-mark", "none",
         ]
@@ -358,19 +396,46 @@ def rodar_calibre(entrada, saida, formato_saida, timeout=900):
         comando = [xvfb, "-a", "--server-args=-screen 0 1024x768x24"] + comando_base
     else:
         comando = comando_base
+    processo = None
+
     try:
-        resultado = subprocess.run(comando, capture_output=True, text=True, timeout=timeout, env=ambiente_calibre())
+        processo = subprocess.Popen(
+            comando,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=ambiente_calibre(),
+        )
+
+        try:
+            stdout, stderr = processo.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                processo.kill()
+            except Exception:
+                pass
+
+            try:
+                stdout, stderr = processo.communicate(timeout=20)
+            except Exception:
+                stdout, stderr = "", ""
+
+            raise subprocess.TimeoutExpired(comando, timeout, output=stdout, stderr=stderr)
+
     finally:
         try:
             if entrada_convertida != entrada and Path(entrada_convertida).exists():
                 Path(entrada_convertida).unlink(missing_ok=True)
         except Exception:
             pass
-    if resultado.returncode != 0:
-        erro = resultado.stderr[-2200:] or resultado.stdout[-2200:] or "Falha na conversão."
+
+    if processo.returncode != 0:
+        erro = (stderr or "")[-2200:] or (stdout or "")[-2200:] or "Falha na conversão."
         raise Exception(erro)
+
     if not saida.exists() or saida.stat().st_size == 0:
         raise Exception("O Calibre terminou, mas o arquivo convertido não foi criado.")
+
     return saida
 
 
@@ -500,8 +565,8 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 15, f"📥 Entrada: {formato_entrada.upper()}\n✨ Saída: {formato_saida.upper()}\n\nPreparando Calibre...")
             saida = TEMP_DIR / nome_saida_convertido(nome_original, formato_saida)
-            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...\n\n⏳ Modo rápido ativado.")
-            saida = await asyncio.to_thread(rodar_calibre, entrada, saida, formato_saida)
+            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...\n\n⏳ Modo rápido ativo. Aguarde o Calibre finalizar.")
+            saida = await converter_com_progresso(entrada, saida, formato_saida, msg, formato_entrada)
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 85, "📦 Preparando arquivo convertido para envio...")
             with open(saida, "rb") as f:
                 await query.message.reply_document(document=InputFile(f, filename=nome_saida_convertido(nome_original, formato_saida)), caption=f"✅ Conversão concluída: {formato_entrada.upper()} → {formato_saida.upper()}", read_timeout=180, write_timeout=180, connect_timeout=90, pool_timeout=90)
@@ -514,7 +579,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             limpar_sessao_capa(user_id)
             usuarios[user_id]["modo"] = "conversor_aguardando"
         except subprocess.TimeoutExpired:
-            await query.message.reply_text("❌ Erro:\nO Calibre demorou demais e parou por tempo limite. Esse arquivo pode ser muito pesado.")
+            await query.message.reply_text("❌ Erro:\nO Calibre travou ou demorou mais de 10 minutos. Eu parei o processo para não deixar o bot preso.\n\nTente converter primeiro para EPUB/AZW3 no Calibre do PC ou use outro formato de saída.")
         except Exception as erro:
             await query.message.reply_text(f"❌ Erro:\n{erro}")
     elif data == "modo_capa":
@@ -524,7 +589,16 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "modo_revisar":
         cancelamentos.discard(user_id)
         usuarios[user_id]["modo"] = "revisar"
-        await query.message.reply_text("🛠 Limpar EPUB\n\nEnvie o EPUB para limpar links gigantes, Wattpad, OceanofPDF, z-library e sujeiras visuais.")
+        await query.message.reply_text(
+            "🛠 Limpar EPUB\n\n"
+            "Envie o EPUB para remover:\n"
+            "• OceanofPDF\n"
+            "• Wattpad links\n"
+            "• z-library\n"
+            "• URLs gigantes\n"
+            "• sujeiras visuais"
+        )
+
     elif data == "voltar":
         usuarios[user_id]["modo"] = None
         await query.message.reply_text("📚 Alma Scriptum Studio\n\nEscolha uma opção:", reply_markup=painel_principal())
@@ -620,27 +694,45 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if modo == "revisar":
             if not nome_original.lower().endswith(".epub"):
-                await update.message.reply_text("⚠️ Envie apenas EPUB para limpar.")
+                await update.message.reply_text("⚠️ Envie apenas EPUB.")
                 return
+
             msg = await update.message.reply_text("🛠 Preparando limpeza...")
             saida = TEMP_DIR / nome_epub(nome_original)
-            await atualizar_carregamento(msg, "🛠 Limpando EPUB", 35, "🧹 Limpando links, Wattpad e sujeiras visuais...")
-            alterados = await asyncio.to_thread(revisar_epub, entrada, saida)
-            await atualizar_carregamento(msg, "🛠 Limpando EPUB", 75, "📦 EPUB limpo criado. Preparando envio...")
 
-            if saida.stat().st_size > 49 * 1024 * 1024:
-                raise Exception("O EPUB limpo ficou maior que o limite de envio do Telegram.")
+            await atualizar_carregamento(
+                msg,
+                "🛠 Limpando EPUB",
+                45,
+                "🧹 Removendo links e sujeiras..."
+            )
+
+            alterados = await asyncio.to_thread(limpar_epub_rapido, entrada, saida)
+
+            await atualizar_carregamento(
+                msg,
+                "🛠 Limpando EPUB",
+                85,
+                "📦 Preparando EPUB limpo..."
+            )
 
             with open(saida, "rb") as f:
                 await update.message.reply_document(
                     document=InputFile(f, filename=nome_epub(nome_original)),
-                    caption=f"✅ EPUB limpo pelo Alma Scriptum Studio.\n🧹 Arquivos internos ajustados: {alterados}",
+                    caption=f"✅ EPUB limpo pelo Alma Scriptum.\n🧹 Arquivos internos ajustados: {alterados}",
                     read_timeout=300,
                     write_timeout=300,
                     connect_timeout=120,
                     pool_timeout=120,
                 )
-            await atualizar_carregamento(msg, "🛠 Limpando EPUB", 100, "✅ EPUB limpo e enviado.")
+
+            await atualizar_carregamento(
+                msg,
+                "🛠 Limpando EPUB",
+                100,
+                "✅ EPUB limpo enviado."
+            )
+
         elif modo == "capa":
             if not nome_original.lower().endswith(".epub"):
                 await update.message.reply_text("⚠️ Envie apenas EPUB.")
@@ -785,7 +877,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — Conversor rápido + capa + limpeza")
+    print("✅ Alma Scriptum Studio ONLINE — Conversor com timeout + capa + limpeza pesada")
     app.run_polling()
 
 if __name__ == "__main__":
