@@ -19,16 +19,6 @@ except Exception:
     ImageFont = None
     ImageOps = None
 
-try:
-    import pytesseract
-except Exception:
-    pytesseract = None
-
-try:
-    from deep_translator import GoogleTranslator
-except Exception:
-    GoogleTranslator = None
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.error import TimedOut, NetworkError
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
@@ -51,7 +41,7 @@ FORMATOS_SAIDA = [
     "FB2", "RB", "EPUB",
     "HTMLZ", "KEPUB", "LIT",
     "PMLZ", "SNB", "TCR",
-    "TXTZ", "ZIP", "KFX",
+    "TXTZ", "ZIP",
 ]
 
 FORMATOS_ENTRADA = {
@@ -87,8 +77,7 @@ def autorizado(user_id):
 def painel_principal():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Conversor Alma Scriptum", callback_data="modo_conversor")],
-        [InlineKeyboardButton("🖼 Traduzir / trocar imagens", callback_data="modo_imagens")],
-        [InlineKeyboardButton("🖼 Editar capa", callback_data="modo_capa")],
+                [InlineKeyboardButton("🖼 Editar capa", callback_data="modo_capa")],
         [InlineKeyboardButton("🛠 Limpar EPUB", callback_data="modo_revisar")],
         [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")],
     ])
@@ -213,14 +202,59 @@ def remover_sujeiras_texto(texto):
 
 
 def limpar_links_sujos_wattpad(soup):
-    for tag in soup.find_all(["p", "div", "span", "a"]):
+    """
+    Remove links soltos de imagem/site dentro do EPUB.
+    Pega também quando o link vem quebrado em pedaços pequenos:
+    https://img.
+    wattpad.com/cover/...
+    """
+    padroes_url = [
+        "img.wattpad.com",
+        "wattpad.com/cover",
+        "wattpad.com/",
+        "https://img.",
+        "http://img.",
+        "/cover/",
+    ]
+
+    # Remove tags inteiras que sejam basicamente links.
+    for tag in soup.find_all(["p", "div", "span", "a", "font"]):
         texto = tag.get_text(" ", strip=True)
         if not texto:
             continue
-        t = texto.lower()
-        if (("img.wattpad.com" in t or "wattpad.com" in t) and len(texto) > 60) or (("http://" in t or "https://" in t) and len(texto) > 90):
+
+        t = texto.lower().replace(" ", "")
+
+        if any(p in t for p in padroes_url):
             tag.decompose()
+            continue
+
+        if ("http://" in t or "https://" in t) and len(t) > 25:
+            tag.decompose()
+            continue
+
+        if re.search(r"[a-z0-9]{20,}", t, flags=re.I):
+            tag.decompose()
+            continue
+
+    # Remove nós de texto soltos com pedaços de URL.
+    for node in list(soup.find_all(string=True)):
+        texto = str(node)
+        t = texto.lower().replace(" ", "")
+
+        if any(p in t for p in padroes_url):
+            node.extract()
+            continue
+
+        if ("http://" in t or "https://" in t) and len(t) > 25:
+            node.extract()
+            continue
+
+        if re.search(r"[a-z0-9]{35,}", t, flags=re.I):
+            node.extract()
+
     return soup
+
 
 
 def revisar_html_simples(html):
@@ -297,7 +331,7 @@ def ambiente_calibre():
     return env
 
 
-def rodar_calibre(entrada, saida, formato_saida, timeout=1800):
+def rodar_calibre(entrada, saida, formato_saida, timeout=900):
     if not ebook_convert_disponivel():
         raise Exception("O comando ebook-convert do Calibre não foi encontrado.")
     entrada = Path(entrada)
@@ -306,18 +340,19 @@ def rodar_calibre(entrada, saida, formato_saida, timeout=1800):
     comando_base = ["ebook-convert", str(entrada_convertida), str(saida)]
     formato_saida = formato_saida.lower()
     if formato_saida == "pdf":
+        # PDF rápido: opções mínimas para o Railway não travar.
         comando_base += [
             "--paper-size", "a5",
-            "--margin-left", "28",
-            "--margin-right", "28",
-            "--margin-top", "28",
-            "--margin-bottom", "28",
-            "--disable-font-rescaling",
-            "--linearize-tables",
-            "--pdf-add-toc",
+            "--margin-left", "20",
+            "--margin-right", "20",
+            "--margin-top", "20",
+            "--margin-bottom", "20",
         ]
     elif formato_saida in ["epub", "mobi", "azw3", "fb2", "lit", "lrf", "pdb", "rb", "snb", "tcr", "txtz", "htmlz", "kepub", "kfx"]:
-        comando_base += ["--disable-font-rescaling", "--chapter-mark", "none", "--page-breaks-before", "/"]
+        # Conversão rápida: sem opções extras pesadas.
+        comando_base += [
+            "--chapter-mark", "none",
+        ]
     xvfb = shutil.which("xvfb-run")
     if xvfb:
         comando = [xvfb, "-a", "--server-args=-screen 0 1024x768x24"] + comando_base
@@ -418,228 +453,6 @@ def buscar_bytes_imagem_epub(entrada, nome_imagem):
     return None, None
 
 
-def traduzir_texto_google_simples(texto):
-    texto = (texto or "").strip()
-    if not texto or GoogleTranslator is None:
-        return texto
-    try:
-        return GoogleTranslator(source="auto", target="pt").translate(texto).strip()
-    except Exception:
-        return texto
-
-
-def carregar_fonte_ajustada(tamanho):
-    if ImageFont is None:
-        return None
-    for nome in ["DejaVuSans-Bold.ttf", "DejaVuSans.ttf", "Arial.ttf", "arial.ttf"]:
-        try:
-            return ImageFont.truetype(nome, tamanho)
-        except Exception:
-            pass
-    return ImageFont.load_default()
-
-
-def cor_media_area(img, x, y, w, h):
-    try:
-        return img.crop((x, y, x + w, y + h)).resize((1, 1)).getpixel((0, 0))
-    except Exception:
-        return (255, 255, 255)
-
-
-def brilho(cor):
-    try:
-        r, g, b = cor[:3]
-        return (r * 299 + g * 587 + b * 114) / 1000
-    except Exception:
-        return 255
-
-
-def quebrar_texto_largura(draw, texto, fonte, largura_max):
-    linhas = []
-    for bloco in str(texto).splitlines():
-        bloco = bloco.strip()
-        if not bloco:
-            continue
-        atual = ""
-        for palavra in bloco.split():
-            teste = palavra if not atual else atual + " " + palavra
-            try:
-                box = draw.textbbox((0, 0), teste, font=fonte)
-                tw = box[2] - box[0]
-            except Exception:
-                tw = len(teste) * 10
-            if tw <= largura_max:
-                atual = teste
-            else:
-                if atual:
-                    linhas.append(atual)
-                atual = palavra
-        if atual:
-            linhas.append(atual)
-    return linhas or [texto]
-
-
-def ocr_linhas_imagem(imagem):
-    if pytesseract is None:
-        raise Exception("OCR não instalado. Adicione pytesseract no requirements.txt e Tesseract no Dockerfile.")
-    img = imagem.convert("RGB")
-    melhor = []
-    for tentativa in [{"escala": 3, "psm": 6, "conf": 10}, {"escala": 4, "psm": 6, "conf": 8}, {"escala": 3, "psm": 11, "conf": 8}]:
-        escala = tentativa["escala"]
-        grande = img.resize((img.width * escala, img.height * escala))
-        cinza = ImageOps.autocontrast(ImageOps.grayscale(grande))
-        dados = pytesseract.image_to_data(cinza, lang="eng", config=f"--psm {tentativa['psm']}", output_type=pytesseract.Output.DICT)
-        grupos = {}
-        for i, txt in enumerate(dados.get("text", [])):
-            txt = (txt or "").strip()
-            try:
-                conf_val = float(dados.get("conf", ["0"])[i])
-            except Exception:
-                conf_val = 0
-            if not txt or conf_val < tentativa["conf"] or not re.search(r"[A-Za-z]", txt):
-                continue
-            key = (dados.get("block_num", [0])[i], dados.get("par_num", [0])[i], dados.get("line_num", [0])[i])
-            x = int(dados["left"][i] / escala)
-            y = int(dados["top"][i] / escala)
-            w = max(1, int(dados["width"][i] / escala))
-            h = max(1, int(dados["height"][i] / escala))
-            grupos.setdefault(key, []).append((txt, x, y, w, h))
-        linhas = []
-        for itens in grupos.values():
-            texto = re.sub(r"\s+", " ", " ".join(t[0] for t in itens).strip())
-            if not texto or len(texto) < 2:
-                continue
-            xs = [t[1] for t in itens]; ys = [t[2] for t in itens]
-            x2s = [t[1] + t[3] for t in itens]; y2s = [t[2] + t[4] for t in itens]
-            x1 = max(0, min(xs) - 6); y1 = max(0, min(ys) - 6)
-            x2 = min(img.width, max(x2s) + 6); y2 = min(img.height, max(y2s) + 6)
-            linhas.append({"texto": texto, "x": x1, "y": y1, "w": max(1, x2 - x1), "h": max(1, y2 - y1)})
-        if len(linhas) > len(melhor):
-            melhor = linhas
-        if len(melhor) >= 2:
-            break
-    return melhor
-
-
-
-def agrupar_linhas_ocr(linhas):
-    """Junta linhas próximas em blocos para evitar tradução palavra por palavra."""
-    if not linhas:
-        return []
-
-    linhas = sorted(linhas, key=lambda i: (i["y"], i["x"]))
-    blocos = []
-
-    for item in linhas:
-        texto = (item.get("texto") or "").strip()
-
-        if not texto or len(texto) <= 2:
-            continue
-
-        x, y, w, h = item["x"], item["y"], item["w"], item["h"]
-
-        if h > w * 4 and len(texto) <= 4:
-            continue
-
-        colocado = False
-
-        for bloco in blocos:
-            bx, by, bw, bh = bloco["x"], bloco["y"], bloco["w"], bloco["h"]
-            mesma_coluna = abs(x - bx) <= max(35, bw * 0.35)
-            perto_vertical = y <= by + bh + max(18, h * 1.4)
-
-            if mesma_coluna and perto_vertical:
-                bloco["itens"].append(item)
-                x1 = min(bloco["x"], x)
-                y1 = min(bloco["y"], y)
-                x2 = max(bloco["x"] + bloco["w"], x + w)
-                y2 = max(bloco["y"] + bloco["h"], y + h)
-                bloco["x"], bloco["y"] = x1, y1
-                bloco["w"], bloco["h"] = x2 - x1, y2 - y1
-                colocado = True
-                break
-
-        if not colocado:
-            blocos.append({"x": x, "y": y, "w": w, "h": h, "itens": [item]})
-
-    resultado = []
-
-    for bloco in blocos:
-        itens = sorted(bloco["itens"], key=lambda i: (i["y"], i["x"]))
-        texto = re.sub(r"\s+", " ", " ".join(i["texto"] for i in itens)).strip()
-
-        if not texto:
-            continue
-
-        palavras = re.findall(r"[A-Za-zÀ-ÿ]+", texto)
-        if len(palavras) == 1 and len(texto) < 12:
-            continue
-
-        resultado.append({
-            "texto": texto,
-            "x": bloco["x"],
-            "y": bloco["y"],
-            "w": bloco["w"],
-            "h": bloco["h"],
-        })
-
-    return resultado
-
-def criar_imagem_estilo_google_tradutor(imagem_bytes):
-    if Image is None:
-        raise Exception("Pillow não instalado. Adicione Pillow no requirements.txt.")
-    imagem = Image.open(BytesIO(imagem_bytes)).convert("RGB")
-    nova = imagem.copy()
-    draw = ImageDraw.Draw(nova, "RGBA")
-    linhas = agrupar_linhas_ocr(ocr_linhas_imagem(imagem))
-    if not linhas:
-        raise Exception("Não encontrei texto legível nessa imagem pelo OCR.")
-    traduzidas = []
-    for item in linhas:
-        original = item["texto"]
-        traduzido = traduzir_texto_google_simples(original) or original
-        x, y, w, h = item["x"], item["y"], item["w"], item["h"]
-        pad = max(6, int(h * 0.28))
-        rx = max(0, x - pad); ry = max(0, y - pad)
-        rw = min(nova.width - rx, w + pad * 2); rh = min(nova.height - ry, h + pad * 2)
-        fundo = cor_media_area(imagem, rx, ry, rw, rh)
-        texto_cor = (20, 20, 20) if brilho(fundo) > 145 else (235, 235, 235)
-        draw.rounded_rectangle((rx, ry, rx + rw, ry + rh), radius=max(2, int(h * 0.25)), fill=(fundo[0], fundo[1], fundo[2], 210))
-        fonte_tam = max(12, min(52, int(h * 0.70)))
-        fonte = carregar_fonte_ajustada(fonte_tam)
-        for tam in range(fonte_tam, 8, -1):
-            fonte = carregar_fonte_ajustada(tam)
-            linhas_texto = quebrar_texto_largura(draw, traduzido, fonte, rw)
-            try:
-                box = draw.textbbox((0, 0), "Ag", font=fonte)
-                lh = max(10, box[3] - box[1] + max(2, tam // 4))
-            except Exception:
-                lh = tam + 4
-            if len(linhas_texto) * lh <= rh + int(h * 0.8):
-                break
-        linhas_texto = quebrar_texto_largura(draw, traduzido, fonte, rw)
-        try:
-            box = draw.textbbox((0, 0), "Ag", font=fonte)
-            lh = max(10, box[3] - box[1] + max(2, fonte_tam // 5))
-        except Exception:
-            lh = fonte_tam + 4
-        total_h = len(linhas_texto) * lh
-        ty = ry + max(0, (rh - total_h) // 2)
-        for linha in linhas_texto:
-            try:
-                tb = draw.textbbox((0, 0), linha, font=fonte)
-                tw = tb[2] - tb[0]
-            except Exception:
-                tw = len(linha) * fonte_tam // 2
-            tx = rx + max(0, (rw - tw) // 2)
-            sombra = (0, 0, 0, 80) if brilho(texto_cor) > 145 else (255, 255, 255, 80)
-            draw.text((tx + 1, ty + 1), linha, fill=sombra, font=fonte)
-            draw.text((tx, ty), linha, fill=texto_cor + (255,), font=fonte)
-            ty += lh
-        traduzidas.append(f"{original} → {traduzido}")
-    buffer = BytesIO()
-    nova.save(buffer, format="JPEG", quality=94)
-    return buffer.getvalue(), traduzidas
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -674,11 +487,20 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not entrada or not Path(entrada).exists():
             await query.message.reply_text("⚠️ Não encontrei o arquivo. Envie novamente.")
             return
+        if str(formato_entrada).lower() in ["kfx", "kfx-zip"]:
+            await query.message.reply_text(
+                "⚠️ Esse arquivo é KFX/KFX-ZIP do Kindle.\n\n"
+                "O Calibre do Railway reconhece o nome, mas NÃO consegue converter KFX sem plugin próprio.\n"
+                "Para converter, primeiro abra no Calibre do PC e converta para EPUB/AZW3. "
+                "Depois envie o EPUB/AZW3 aqui no bot."
+            )
+            return
+
         msg = await query.message.reply_text("🔄 Preparando conversão...")
         try:
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 15, f"📥 Entrada: {formato_entrada.upper()}\n✨ Saída: {formato_saida.upper()}\n\nPreparando Calibre...")
             saida = TEMP_DIR / nome_saida_convertido(nome_original, formato_saida)
-            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...")
+            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...\n\n⏳ Modo rápido ativado.")
             saida = await asyncio.to_thread(rodar_calibre, entrada, saida, formato_saida)
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 85, "📦 Preparando arquivo convertido para envio...")
             with open(saida, "rb") as f:
@@ -695,10 +517,6 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Erro:\nO Calibre demorou demais e parou por tempo limite. Esse arquivo pode ser muito pesado.")
         except Exception as erro:
             await query.message.reply_text(f"❌ Erro:\n{erro}")
-    elif data == "modo_imagens":
-        cancelamentos.discard(user_id)
-        usuarios[user_id]["modo"] = "imagens"
-        await query.message.reply_text("🖼 Traduzir / trocar imagens\n\nEnvie o EPUB. Vou mostrar as imagens encontradas.")
     elif data == "modo_capa":
         cancelamentos.discard(user_id)
         usuarios[user_id]["modo"] = "capa"
@@ -720,32 +538,6 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if indice not in usuarios[user_id]["remover_imagens"]:
             usuarios[user_id]["remover_imagens"].append(indice)
         await query.message.reply_text(f"🗑 Imagem {indice + 1} marcada para remoção.\n\nQuando terminar, aperte 📦 Finalizar edição.")
-    elif data.startswith("traduzir_img_"):
-        indice = int(data.replace("traduzir_img_", "")) - 1
-        dados = usuarios.get(user_id, {})
-        entrada = dados.get("capa_entrada")
-        imagens = dados.get("capa_imagens", [])
-        if not entrada or indice < 0 or indice >= len(imagens):
-            await query.message.reply_text("⚠️ Não encontrei essa imagem. Envie o EPUB novamente.")
-            return
-        msg = await query.message.reply_text("🌐 Traduzindo imagem no estilo Google Tradutor...")
-        try:
-            imagem_bytes, _ = buscar_bytes_imagem_epub(entrada, imagens[indice])
-            if not imagem_bytes:
-                await msg.edit_text("⚠️ Não consegui localizar a imagem dentro do EPUB.")
-                return
-            nova_bytes, traducoes = await asyncio.to_thread(criar_imagem_estilo_google_tradutor, imagem_bytes)
-            preview = TEMP_DIR / f"imagem_traduzida_{uuid.uuid4().hex}.jpg"
-            preview.write_bytes(nova_bytes)
-            resumo = "\n".join(traducoes[:8])
-            if len(resumo) > 900:
-                resumo = resumo[:900] + "..."
-            with open(preview, "rb") as img_file:
-                await query.message.reply_photo(photo=img_file, caption=f"✅ Imagem {indice + 1} traduzida no estilo Google Tradutor.\n\nO EPUB ainda NÃO foi alterado.\nSe gostar, toque em 🔁 Trocar imagem e envie esta imagem traduzida.\n\nTrechos:\n{resumo}")
-            await msg.edit_text("✅ Tradução da imagem concluída.")
-            preview.unlink(missing_ok=True)
-        except Exception as erro:
-            await query.message.reply_text(f"❌ Não consegui traduzir essa imagem:\n{erro}")
     elif data.startswith("trocar_img_"):
         indice = int(data.replace("trocar_img_", "")) - 1
         imagens = usuarios.get(user_id, {}).get("capa_imagens", [])
@@ -849,14 +641,14 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pool_timeout=120,
                 )
             await atualizar_carregamento(msg, "🛠 Limpando EPUB", 100, "✅ EPUB limpo e enviado.")
-        elif modo in ["imagens", "capa"]:
+        elif modo == "capa":
             if not nome_original.lower().endswith(".epub"):
                 await update.message.reply_text("⚠️ Envie apenas EPUB.")
                 return
-            titulo = "🖼 Traduzir / trocar imagens" if modo == "imagens" else "🖼 Editor de capa"
+            titulo = "🖼 Editor de capa"
             msg = await update.message.reply_text("🖼 Preparando imagens...")
-            limite = 30 if modo == "imagens" else 3
-            imagens = pegar_todas_imagens_epub(entrada, limite=limite) if modo == "imagens" else pegar_imagens_iniciais(entrada, limite=limite)
+            limite = 3
+            imagens = pegar_imagens_iniciais(entrada, limite=limite)
             usuarios[user_id]["capa_entrada"] = str(entrada)
             usuarios[user_id]["capa_nome_original"] = nome_original
             usuarios[user_id]["capa_imagens"] = [img.file_name for img in imagens]
@@ -869,8 +661,6 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 img_path = salvar_imagem_temp(img)
                 try:
                     botoes = [[InlineKeyboardButton(f"🔁 Trocar imagem {i}", callback_data=f"trocar_img_{i}")], [InlineKeyboardButton(f"🗑 Remover imagem {i}", callback_data=f"remover_img_{i}"), InlineKeyboardButton("✅ Manter", callback_data="manter_img")], [InlineKeyboardButton("📦 Finalizar edição", callback_data="finalizar_capa")]]
-                    if modo == "imagens":
-                        botoes.insert(0, [InlineKeyboardButton(f"🌐 Traduzir imagem {i}", callback_data=f"traduzir_img_{i}")])
                     with open(img_path, "rb") as img_file:
                         await update.message.reply_photo(photo=img_file, caption=f"🖼 Imagem {i}\nArquivo interno: {img.file_name}", reply_markup=InlineKeyboardMarkup(botoes))
                 except Exception as erro:
@@ -885,7 +675,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Erro:\n{erro}")
     finally:
         try:
-            if modo not in ["capa", "imagens", "conversor_aguardando"]:
+            if modo not in ["capa", "conversor_aguardando"]:
                 entrada.unlink(missing_ok=True)
             if saida:
                 Path(saida).unlink(missing_ok=True)
@@ -995,7 +785,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — Conversor universal + imagens + capa + limpeza")
+    print("✅ Alma Scriptum Studio ONLINE — Conversor rápido + capa + limpeza")
     app.run_polling()
 
 if __name__ == "__main__":
