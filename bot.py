@@ -878,16 +878,25 @@ async def receber_documento_imagem(update: Update, context: ContextTypes.DEFAULT
 
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).read_timeout(180).write_timeout(180).connect_timeout(90).pool_timeout(90).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .read_timeout(300)
+        .write_timeout(300)
+        .connect_timeout(120)
+        .pool_timeout(120)
+        .build()
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("cancelar", cancelar_cmd))
     app.add_handler(CallbackQueryHandler(botoes))
     app.add_handler(MessageHandler(filters.PHOTO, receber_foto))
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
+
     print("✅ Alma Scriptum Studio ONLINE — Conversor universal + imagens + capa + limpeza")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
