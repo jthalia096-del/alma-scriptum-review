@@ -51,7 +51,7 @@ FORMATOS_SAIDA = [
     "FB2", "RB", "EPUB",
     "HTMLZ", "KEPUB", "LIT",
     "PMLZ", "SNB", "TCR",
-    "TXTZ", "ZIP",
+    "TXTZ", "ZIP", "KFX",
 ]
 
 FORMATOS_ENTRADA = {
@@ -74,6 +74,8 @@ FORMATOS_ENTRADA = {
     ".tcr": "TCR 📚 eBook",
     ".txtz": "TXTZ 📃 texto",
     ".zip": "ZIP 📦 arquivo",
+    ".kfx": "KFX 📚 Kindle",
+    ".kfx-zip": "KFX-ZIP 📚 Kindle",
     ".oeb": "OEB 📚 eBook",
 }
 
@@ -126,7 +128,10 @@ async def atualizar_carregamento(mensagem, titulo, porcentagem, status):
 
 
 def detectar_formato(nome):
-    ext = Path(nome or "").suffix.lower()
+    nome = nome or ""
+    if nome.lower().endswith(".kfx-zip"):
+        return "kfx-zip", FORMATOS_ENTRADA.get(".kfx-zip", "KFX-ZIP 📚 Kindle")
+    ext = Path(nome).suffix.lower()
     return ext.replace(".", ""), FORMATOS_ENTRADA.get(ext, ext.replace(".", "").upper() or "DESCONHECIDO")
 
 
@@ -235,14 +240,25 @@ def revisar_html_simples(html):
 
 def revisar_epub(entrada, saida):
     book = epub.read_epub(str(entrada))
+    alterados = 0
+
     for item in book.get_items_of_type(ITEM_DOCUMENT):
         try:
             html = item.get_content().decode("utf-8", errors="ignore")
-            html = revisar_html_simples(html)
-            item.set_content(html.encode("utf-8"))
+            novo_html = revisar_html_simples(html)
+
+            if novo_html != html:
+                alterados += 1
+                item.set_content(novo_html.encode("utf-8"))
         except Exception:
             pass
+
     epub.write_epub(str(saida), book)
+
+    if not Path(saida).exists() or Path(saida).stat().st_size == 0:
+        raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
+
+    return alterados
 
 
 def ebook_convert_disponivel():
@@ -291,16 +307,16 @@ def rodar_calibre(entrada, saida, formato_saida, timeout=1800):
     formato_saida = formato_saida.lower()
     if formato_saida == "pdf":
         comando_base += [
-    "--paper-size", "a5",
-    "--margin-left", "28",
-    "--margin-right", "28",
-    "--margin-top", "28",
-    "--margin-bottom", "28",
-    "--disable-font-rescaling",
-    "--linearize-tables",
-    "--pdf-add-toc"
-]
-    elif formato_saida in ["epub", "mobi", "azw3", "fb2", "lit", "lrf", "pdb", "rb", "snb", "tcr", "txtz", "htmlz", "kepub"]:
+            "--paper-size", "a5",
+            "--margin-left", "28",
+            "--margin-right", "28",
+            "--margin-top", "28",
+            "--margin-bottom", "28",
+            "--disable-font-rescaling",
+            "--linearize-tables",
+            "--pdf-add-toc",
+        ]
+    elif formato_saida in ["epub", "mobi", "azw3", "fb2", "lit", "lrf", "pdb", "rb", "snb", "tcr", "txtz", "htmlz", "kepub", "kfx"]:
         comando_base += ["--disable-font-rescaling", "--chapter-mark", "none", "--page-breaks-before", "/"]
     xvfb = shutil.which("xvfb-run")
     if xvfb:
@@ -505,13 +521,77 @@ def ocr_linhas_imagem(imagem):
     return melhor
 
 
+
+def agrupar_linhas_ocr(linhas):
+    """Junta linhas próximas em blocos para evitar tradução palavra por palavra."""
+    if not linhas:
+        return []
+
+    linhas = sorted(linhas, key=lambda i: (i["y"], i["x"]))
+    blocos = []
+
+    for item in linhas:
+        texto = (item.get("texto") or "").strip()
+
+        if not texto or len(texto) <= 2:
+            continue
+
+        x, y, w, h = item["x"], item["y"], item["w"], item["h"]
+
+        if h > w * 4 and len(texto) <= 4:
+            continue
+
+        colocado = False
+
+        for bloco in blocos:
+            bx, by, bw, bh = bloco["x"], bloco["y"], bloco["w"], bloco["h"]
+            mesma_coluna = abs(x - bx) <= max(35, bw * 0.35)
+            perto_vertical = y <= by + bh + max(18, h * 1.4)
+
+            if mesma_coluna and perto_vertical:
+                bloco["itens"].append(item)
+                x1 = min(bloco["x"], x)
+                y1 = min(bloco["y"], y)
+                x2 = max(bloco["x"] + bloco["w"], x + w)
+                y2 = max(bloco["y"] + bloco["h"], y + h)
+                bloco["x"], bloco["y"] = x1, y1
+                bloco["w"], bloco["h"] = x2 - x1, y2 - y1
+                colocado = True
+                break
+
+        if not colocado:
+            blocos.append({"x": x, "y": y, "w": w, "h": h, "itens": [item]})
+
+    resultado = []
+
+    for bloco in blocos:
+        itens = sorted(bloco["itens"], key=lambda i: (i["y"], i["x"]))
+        texto = re.sub(r"\s+", " ", " ".join(i["texto"] for i in itens)).strip()
+
+        if not texto:
+            continue
+
+        palavras = re.findall(r"[A-Za-zÀ-ÿ]+", texto)
+        if len(palavras) == 1 and len(texto) < 12:
+            continue
+
+        resultado.append({
+            "texto": texto,
+            "x": bloco["x"],
+            "y": bloco["y"],
+            "w": bloco["w"],
+            "h": bloco["h"],
+        })
+
+    return resultado
+
 def criar_imagem_estilo_google_tradutor(imagem_bytes):
     if Image is None:
         raise Exception("Pillow não instalado. Adicione Pillow no requirements.txt.")
     imagem = Image.open(BytesIO(imagem_bytes)).convert("RGB")
     nova = imagem.copy()
     draw = ImageDraw.Draw(nova, "RGBA")
-    linhas = ocr_linhas_imagem(imagem)
+    linhas = agrupar_linhas_ocr(ocr_linhas_imagem(imagem))
     if not linhas:
         raise Exception("Não encontrei texto legível nessa imagem pelo OCR.")
     traduzidas = []
@@ -519,13 +599,13 @@ def criar_imagem_estilo_google_tradutor(imagem_bytes):
         original = item["texto"]
         traduzido = traduzir_texto_google_simples(original) or original
         x, y, w, h = item["x"], item["y"], item["w"], item["h"]
-        pad = max(4, int(h * 0.35))
+        pad = max(6, int(h * 0.28))
         rx = max(0, x - pad); ry = max(0, y - pad)
         rw = min(nova.width - rx, w + pad * 2); rh = min(nova.height - ry, h + pad * 2)
         fundo = cor_media_area(imagem, rx, ry, rw, rh)
         texto_cor = (20, 20, 20) if brilho(fundo) > 145 else (235, 235, 235)
-        draw.rounded_rectangle((rx, ry, rx + rw, ry + rh), radius=max(2, int(h * 0.25)), fill=(fundo[0], fundo[1], fundo[2], 235))
-        fonte_tam = max(10, min(60, int(h * 0.95)))
+        draw.rounded_rectangle((rx, ry, rx + rw, ry + rh), radius=max(2, int(h * 0.25)), fill=(fundo[0], fundo[1], fundo[2], 210))
+        fonte_tam = max(12, min(52, int(h * 0.70)))
         fonte = carregar_fonte_ajustada(fonte_tam)
         for tam in range(fonte_tam, 8, -1):
             fonte = carregar_fonte_ajustada(tam)
@@ -738,7 +818,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if modo == "conversor_aguardando":
             formato, descricao = detectar_formato(nome_original)
             if not formato or f".{formato.lower()}" not in FORMATOS_ENTRADA:
-                await update.message.reply_text("⚠️ Formato não reconhecido. Envie EPUB, PDF, MOBI, AZW3, DOCX, TXT, RTF, FB2, HTMLZ, KEPUB, LIT, LRF, PDB, PMLZ, RB, SNB, TCR, TXTZ, ZIP ou OEB.")
+                await update.message.reply_text("⚠️ Formato não reconhecido. Envie EPUB, PDF, MOBI, AZW3, DOCX, TXT, RTF, FB2, HTMLZ, KEPUB, LIT, LRF, PDB, PMLZ, RB, SNB, TCR, TXTZ, ZIP, KFX, KFX-ZIP ou OEB.")
                 entrada.unlink(missing_ok=True)
                 return
             usuarios[user_id]["conv_entrada"] = str(entrada)
@@ -752,11 +832,22 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             msg = await update.message.reply_text("🛠 Preparando limpeza...")
             saida = TEMP_DIR / nome_epub(nome_original)
-            await atualizar_carregamento(msg, "🛠 Limpando EPUB", 45, "🧹 Limpando links e sujeiras...")
-            await asyncio.to_thread(revisar_epub, entrada, saida)
-            await atualizar_carregamento(msg, "🛠 Limpando EPUB", 85, "📦 Preparando EPUB limpo...")
+            await atualizar_carregamento(msg, "🛠 Limpando EPUB", 35, "🧹 Limpando links, Wattpad e sujeiras visuais...")
+            alterados = await asyncio.to_thread(revisar_epub, entrada, saida)
+            await atualizar_carregamento(msg, "🛠 Limpando EPUB", 75, "📦 EPUB limpo criado. Preparando envio...")
+
+            if saida.stat().st_size > 49 * 1024 * 1024:
+                raise Exception("O EPUB limpo ficou maior que o limite de envio do Telegram.")
+
             with open(saida, "rb") as f:
-                await update.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ EPUB limpo pelo Alma Scriptum Studio.", read_timeout=180, write_timeout=180, connect_timeout=90, pool_timeout=90)
+                await update.message.reply_document(
+                    document=InputFile(f, filename=nome_epub(nome_original)),
+                    caption=f"✅ EPUB limpo pelo Alma Scriptum Studio.\n🧹 Arquivos internos ajustados: {alterados}",
+                    read_timeout=300,
+                    write_timeout=300,
+                    connect_timeout=120,
+                    pool_timeout=120,
+                )
             await atualizar_carregamento(msg, "🛠 Limpando EPUB", 100, "✅ EPUB limpo e enviado.")
         elif modo in ["imagens", "capa"]:
             if not nome_original.lower().endswith(".epub"):
