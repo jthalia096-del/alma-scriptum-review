@@ -164,12 +164,14 @@ async def converter_com_progresso(entrada, saida, formato_saida, msg, formato_en
             msg,
             "🔄 Conversor Alma Scriptum",
             progresso,
-            f"⚙️ Convertendo {str(formato_entrada).upper()} para {str(formato_saida).upper()}...
+            (
+                f"⚙️ Convertendo {str(formato_entrada).upper()} para {str(formato_saida).upper()}...
 
 "
-            f"⏳ Calibre trabalhando há {tempo_total}s.
+                f"⏳ Calibre trabalhando há {tempo_total}s.
 "
-            "Se passar de 10 minutos, eu paro e aviso."
+                "Se passar de 10 minutos, eu paro e aviso."
+            )
         )
 
     return await tarefa
