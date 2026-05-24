@@ -5,16 +5,10 @@ import shutil
 import zipfile
 import subprocess
 import asyncio
-from html import unescape
 from pathlib import Path
 
 from bs4 import BeautifulSoup, NavigableString
 from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
-
-try:
-    from weasyprint import HTML
-except Exception:
-    HTML = None
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.error import TimedOut, NetworkError
@@ -151,28 +145,6 @@ def nome_epub(nome):
 
 
 async def converter_com_progresso(entrada, saida, formato_saida, msg, formato_entrada):
-    entrada = Path(entrada)
-    formato_saida = str(formato_saida).lower()
-
-    if pode_usar_pdf_rapido(entrada, formato_saida):
-        await atualizar_carregamento(
-            msg,
-            "🔄 Conversor Alma Scriptum",
-            50,
-            "⚡ Convertendo EPUB para PDF em modo rápido...\n\nSem usar o Calibre pesado."
-        )
-
-        resultado = await asyncio.to_thread(converter_epub_pdf_rapido, entrada, saida)
-
-        await atualizar_carregamento(
-            msg,
-            "🔄 Conversor Alma Scriptum",
-            85,
-            "📦 PDF criado. Preparando envio..."
-        )
-
-        return resultado
-
     tarefa = asyncio.create_task(asyncio.to_thread(rodar_calibre, entrada, saida, formato_saida))
 
     progresso = 45
@@ -193,13 +165,14 @@ async def converter_com_progresso(entrada, saida, formato_saida, msg, formato_en
             "🔄 Conversor Alma Scriptum",
             progresso,
             (
-                f"⚙️ Convertendo {str(formato_entrada).upper()} para {str(formato_saida).upper()}...\n\n"
-                f"⏳ Calibre ainda trabalhando há {tempo_total}s.\n"
-                "PDF de EPUB usa modo rápido. Outros formatos continuam no Calibre."
+                f"⚙️ Convertendo {str(formato_entrada).upper()} para {str(formato_saida).upper()}...\\n\\n"
+                f"⏳ Calibre ainda trabalhando há {tempo_total}s.\\n"
+                "Arquivos grandes podem demorar bastante, principalmente EPUB → PDF."
             )
         )
 
     return await tarefa
+
 
 
 
@@ -420,177 +393,40 @@ def limpar_nome_arquivo_interno(nome):
 
 
 
-def limpar_html_sem_quebrar_estrutura(html):
+def limpar_html_texto_visivel(html):
     """
-    Limpeza ultra segura:
-    - NÃO reescreve o XHTML com BeautifulSoup;
-    - NÃO remove img/src;
-    - NÃO mexe em OPF/NCX/XML;
-    - só remove textos visíveis/links de propaganda;
-    - troca href sujo por "#", preservando a tag.
+    Limpa somente textos visíveis de propaganda/site.
+    Não mexe em imagens, href/src, OPF, NCX, CSS.
     """
     if not html:
         return html
 
-    html = str(html)
+    def limpar_texto_visivel(trecho):
+        padroes = [
+            r"Ocean\s*of\s*PDF\.?\s*com",
+            r"OceanofPDF\.?\s*com",
+            r"OceanPDF\.?\s*com",
+            r"OceanofPDF",
+            r"Ocean\s*PDF",
+            r"z[\s\-_]*library(?:\.sk|\.org)?",
+            r"z[\s\-_]*lib(?:\.org)?",
+            r"1lib(?:\.sk|\.org)?",
+            r"libgen(?:\.is|\.rs)?",
+            r"anna['’]?s[\s\-_]*archive",
+            r"https?://(?:www\.)?(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad|img\.wattpad|t\.me|telegram\.me|discord\.gg)[^\s<>'\"]*",
+            r"www\.(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad)[^\s<>'\"]*",
+            r"uploaded\s+by\s*:?\s*[^<\n\r]+",
+            r"shared\s+by\s*:?\s*[^<\n\r]+",
+            r"downloaded\s+from\s*:?\s*[^<\n\r]+",
+        ]
 
-    # Remove scripts/noscript inteiros, sem tocar imagens.
-    html = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.I | re.S)
-    html = re.sub(r"<noscript\b[^>]*>.*?</noscript>", "", html, flags=re.I | re.S)
+        novo = str(trecho)
+        for p in padroes:
+            novo = re.sub(p, "", novo, flags=re.I)
 
-    # Em links <a href="site-sujo">, não apaga a tag/imagem: só neutraliza o href.
-    padrao_href_sujo = (
-        r'(<a\b[^>]*\bhref=["\'])'
-        r'[^"\']*(?:ocean\s*of\s*pdf|oceanofpdf|oceanpdf|z[\s\-_]*library|z[\s\-_]*lib|1lib|libgen|wattpad|img\.wattpad|anna[’\']?s[\s\-_]*archive|t\.me|telegram\.me|discord\.gg)'
-        r'[^"\']*(["\'])'
-    )
-    html = re.sub(padrao_href_sujo, r'\1#\2', html, flags=re.I)
-
-    # Remove URLs/sujeiras quando aparecem como texto.
-    padroes_texto = [
-        r"Ocean\s*of\s*PDF\.?\s*com",
-        r"OceanofPDF\.?\s*com",
-        r"OceanPDF\.?\s*com",
-        r"OceanofPDF",
-        r"Ocean\s*PDF",
-        r"z[\s\-_]*library(?:\.sk|\.org)?",
-        r"z[\s\-_]*lib(?:\.org)?",
-        r"1lib(?:\.sk|\.org)?",
-        r"libgen(?:\.is|\.rs)?",
-        r"anna['’]?s[\s\-_]*archive",
-        r"https?://(?:www\.)?(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad|img\.wattpad|t\.me|telegram\.me|discord\.gg)[^\s<>'\"]*",
-        r"www\.(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad)[^\s<>'\"]*",
-        r"uploaded\s+by\s*:?\s*[^<\n\r]+",
-        r"shared\s+by\s*:?\s*[^<\n\r]+",
-        r"downloaded\s+from\s*:?\s*[^<\n\r]+",
-    ]
-
-    for p in padroes_texto:
-        html = re.sub(p, "", html, flags=re.I)
-
-    # Remove hashes gigantes soltos, mas não mexe em atributos src/href.
-    # Só quando estiver entre tags como texto.
-    html = re.sub(r">(?:\s*[A-Za-z0-9]{60,}\s*)<", "><", html)
-
-    # Limpeza leve de espaços entre tags/texto.
-    html = re.sub(r"\s+([,.!?;:])", r"\1", html)
-    html = re.sub(r"[ \t]{2,}", " ", html)
-
-    return html
-
-
-def limpar_css_sem_quebrar(css):
-    if not css:
-        return css
-
-    css = str(css)
-    # Não remove URLs de fonte/imagem em CSS para não quebrar visual.
-    # Só remove menções textuais óbvias.
-    css = re.sub(r"Ocean\s*of\s*PDF\.?\s*com", "", css, flags=re.I)
-    css = re.sub(r"OceanofPDF\.?\s*com", "", css, flags=re.I)
-    css = re.sub(r"z[\s\-_]*library", "", css, flags=re.I)
-    return css
-
-
-
-def limpar_html_cirurgico(html):
-    """
-    Limpeza cirúrgica:
-    preserva a estrutura original do XHTML/HTML.
-    Não usa BeautifulSoup para reescrever o arquivo.
-    Não mexe em imagens, OPF, NCX, XML, CSS ou mimetype.
-    """
-    if not html:
-        return html
-
-    html = str(html)
-
-    html = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.I | re.S)
-    html = re.sub(r"<noscript\b[^>]*>.*?</noscript>", "", html, flags=re.I | re.S)
-
-    html = re.sub(
-        r'(<a\b[^>]*\bhref=["\'])[^"\']*(ocean\s*of\s*pdf|oceanofpdf|oceanpdf|z[\s\-_]*library|z[\s\-_]*lib|1lib|libgen|wattpad|img\.wattpad|anna[’\']?s[\s\-_]*archive|t\.me|telegram\.me|discord\.gg)[^"\']*(["\'])',
-        r'\1#\3',
-        html,
-        flags=re.I,
-    )
-
-    padroes = [
-        r"Ocean\s*of\s*PDF\.?\s*com",
-        r"OceanofPDF\.?\s*com",
-        r"OceanPDF\.?\s*com",
-        r"OceanofPDF",
-        r"Ocean\s*PDF",
-        r"z[\s\-_]*library(?:\.sk|\.org)?",
-        r"z[\s\-_]*lib(?:\.org)?",
-        r"1lib(?:\.sk|\.org)?",
-        r"libgen(?:\.is|\.rs)?",
-        r"anna['’]?s[\s\-_]*archive",
-        r"https?://(?:www\.)?(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad|img\.wattpad|t\.me|telegram\.me|discord\.gg)[^\s<>'\"]*",
-        r"www\.(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad)[^\s<>'\"]*",
-        r"uploaded\s+by\s*:?\s*[^<\n\r]+",
-        r"shared\s+by\s*:?\s*[^<\n\r]+",
-        r"downloaded\s+from\s*:?\s*[^<\n\r]+",
-    ]
-
-    for p in padroes:
-        html = re.sub(p, "", html, flags=re.I)
-
-    html = re.sub(r">[ \t\r\n]*[A-Za-z0-9]{80,}[ \t\r\n]*<", "><", html)
-    html = re.sub(r"[ \t]{2,}", " ", html)
-
-    return html
-
-
-def detectar_encoding_xml(data):
-    """
-    Tenta respeitar encoding declarado no arquivo.
-    Se não achar, usa utf-8.
-    """
-    amostra = data[:300].decode("ascii", errors="ignore")
-    m = re.search(r'encoding=["\']([^"\']+)["\']', amostra, flags=re.I)
-    if m:
-        return m.group(1)
-    return "utf-8"
-
-
-
-def limpar_texto_visivel_sem_mexer_tags(trecho):
-    if not trecho:
-        return trecho
-
-    padroes = [
-        r"Ocean\s*of\s*PDF\.?\s*com",
-        r"OceanofPDF\.?\s*com",
-        r"OceanPDF\.?\s*com",
-        r"OceanofPDF",
-        r"Ocean\s*PDF",
-        r"z[\s\-_]*library(?:\.sk|\.org)?",
-        r"z[\s\-_]*lib(?:\.org)?",
-        r"1lib(?:\.sk|\.org)?",
-        r"libgen(?:\.is|\.rs)?",
-        r"anna['’]?s[\s\-_]*archive",
-        r"https?://(?:www\.)?(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad|img\.wattpad|t\.me|telegram\.me|discord\.gg)[^\s<>'\"]*",
-        r"www\.(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad)[^\s<>'\"]*",
-        r"uploaded\s+by\s*:?\s*[^<\n\r]+",
-        r"shared\s+by\s*:?\s*[^<\n\r]+",
-        r"downloaded\s+from\s*:?\s*[^<\n\r]+",
-    ]
-
-    novo = str(trecho)
-
-    for p in padroes:
-        novo = re.sub(p, "", novo, flags=re.I)
-
-    novo = re.sub(r"\b[A-Za-z0-9]{90,}\b", "", novo)
-    novo = re.sub(r"[ \t]{2,}", " ", novo)
-
-    return novo
-
-
-def limpar_html_sem_quebrar_tags(html):
-    if not html:
-        return html
+        novo = re.sub(r"\b[A-Za-z0-9]{90,}\b", "", novo)
+        novo = re.sub(r"[ \t]{2,}", " ", novo)
+        return novo
 
     partes = re.split(r"(<[^>]+>)", str(html))
     saida = []
@@ -602,27 +438,22 @@ def limpar_html_sem_quebrar_tags(html):
             continue
 
         if parte.startswith("<") and parte.endswith(">"):
-            tag_lower = parte.lower()
+            tl = parte.lower()
 
-            if re.match(r"<\s*script\b", tag_lower):
+            if re.match(r"<\s*script\b", tl) or re.match(r"<\s*noscript\b", tl):
                 dentro_script = True
                 continue
-            if re.match(r"<\s*/\s*script\s*>", tag_lower):
+
+            if re.match(r"<\s*/\s*script\s*>", tl) or re.match(r"<\s*/\s*noscript\s*>", tl):
                 dentro_script = False
                 continue
 
-            if re.match(r"<\s*noscript\b", tag_lower):
-                dentro_script = True
-                continue
-            if re.match(r"<\s*/\s*noscript\s*>", tag_lower):
-                dentro_script = False
-                continue
-
-            if re.match(r"<\s*style\b", tag_lower):
+            if re.match(r"<\s*style\b", tl):
                 dentro_style = True
                 saida.append(parte)
                 continue
-            if re.match(r"<\s*/\s*style\s*>", tag_lower):
+
+            if re.match(r"<\s*/\s*style\s*>", tl):
                 dentro_style = False
                 saida.append(parte)
                 continue
@@ -637,7 +468,7 @@ def limpar_html_sem_quebrar_tags(html):
             saida.append(parte)
             continue
 
-        saida.append(limpar_texto_visivel_sem_mexer_tags(parte))
+        saida.append(limpar_texto_visivel(parte))
 
     return "".join(saida)
 
@@ -650,192 +481,98 @@ def detectar_encoding_xml(data):
     return "utf-8"
 
 
-def escrever_epub_preservando_mimetype(saida, entradas):
-    saida = Path(saida)
+def copiar_epub_com_limpeza_cirurgica(entrada, saida_temp):
+    """
+    Copia o EPUB preservando tudo.
+    Só altera HTML/XHTML/HTM com limpeza de texto visível.
+    """
+    alterados = 0
 
-    with zipfile.ZipFile(saida, "w") as zout:
-        mimetype_data = None
-        outros = []
+    with zipfile.ZipFile(entrada, "r") as zin:
+        with zipfile.ZipFile(saida_temp, "w") as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                nome = item.filename.replace("\\", "/").lower()
 
-        for item, data in entradas:
-            nome = item.filename.replace("\\", "/")
-            if nome == "mimetype":
-                mimetype_data = data
-            else:
-                outros.append((item, data))
+                if nome.endswith((".html", ".xhtml", ".htm")):
+                    try:
+                        enc = detectar_encoding_xml(data)
+                        texto = data.decode(enc, errors="ignore")
+                        novo = limpar_html_texto_visivel(texto)
 
-        info = zipfile.ZipInfo("mimetype")
-        info.compress_type = zipfile.ZIP_STORED
-        zout.writestr(info, mimetype_data or b"application/epub+zip")
+                        if novo != texto:
+                            alterados += 1
+                            data = novo.encode(enc, errors="xmlcharrefreplace")
+                    except Exception:
+                        pass
 
-        for item, data in outros:
-            item.filename = item.filename.replace("\\", "/")
-            if item.filename == "mimetype":
-                continue
-            item.compress_type = zipfile.ZIP_DEFLATED
-            zout.writestr(item, data)
+                zout.writestr(item, data)
+
+    return alterados
+
+
+def reparar_epub_com_calibre(entrada, saida):
+    """
+    Repara/reconstrói o EPUB com o Calibre via EPUB -> EPUB.
+    Se falhar, copia o arquivo cirúrgico.
+    """
+    if not ebook_convert_disponivel():
+        shutil.copyfile(entrada, saida)
+        return saida
+
+    comando = [
+        "ebook-convert",
+        str(entrada),
+        str(saida),
+        "--chapter-mark", "none",
+        "--disable-font-rescaling",
+    ]
+
+    xvfb = shutil.which("xvfb-run")
+    if xvfb:
+        comando = [xvfb, "-a", "--server-args=-screen 0 1024x768x24"] + comando
+
+    resultado = subprocess.run(
+        comando,
+        capture_output=True,
+        text=True,
+        timeout=900,
+        env=ambiente_calibre(),
+    )
+
+    if resultado.returncode != 0 or not Path(saida).exists() or Path(saida).stat().st_size == 0:
+        shutil.copyfile(entrada, saida)
 
     return saida
 
 
 def limpar_epub_rapido(entrada, saida):
-    alterados = 0
-    entradas = []
-
-    with zipfile.ZipFile(entrada, "r") as zin:
-        for item in zin.infolist():
-            data = zin.read(item.filename)
-            nome_lower = item.filename.replace("\\", "/").lower()
-
-            if nome_lower.endswith((".html", ".xhtml", ".htm")):
-                try:
-                    enc = detectar_encoding_xml(data)
-                    texto = data.decode(enc, errors="ignore")
-                    novo = limpar_html_sem_quebrar_tags(texto)
-
-                    if novo != texto:
-                        alterados += 1
-                        data = novo.encode(enc, errors="xmlcharrefreplace")
-
-                except Exception:
-                    pass
-
-            entradas.append((item, data))
-
-    escrever_epub_preservando_mimetype(saida, entradas)
-
-    if not Path(saida).exists() or Path(saida).stat().st_size == 0:
-        raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
-
-    return alterados
-
-
-
-
-
-
-
-
-
-
-
-def extrair_htmls_epub_ordenado(caminho_epub):
     """
-    Extrai HTML/XHTML do EPUB para conversão rápida em PDF.
+    Limpeza com reparo final:
+    1. faz limpeza cirúrgica sem mexer em imagens/src/href/OPF;
+    2. reconstrói EPUB com Calibre EPUB -> EPUB para melhorar compatibilidade;
+    3. se Calibre falhar, entrega a cópia limpa cirúrgica.
     """
-    caminho_epub = Path(caminho_epub)
-    pasta = TEMP_DIR / f"epub_pdf_{uuid.uuid4().hex}"
-    pasta.mkdir(parents=True, exist_ok=True)
-
-    with zipfile.ZipFile(caminho_epub, "r") as zin:
-        zin.extractall(pasta)
-
-    htmls = []
-    for p in pasta.rglob("*"):
-        if p.suffix.lower() in [".xhtml", ".html", ".htm"]:
-            nome = p.name.lower()
-            if nome in ["nav.xhtml", "toc.xhtml"]:
-                continue
-            htmls.append(p)
-
-    htmls = sorted(htmls, key=lambda x: str(x).lower())
-    return pasta, htmls
-
-
-def preparar_html_para_pdf(conteudo, arquivo_base):
-    soup = BeautifulSoup(conteudo, "html.parser")
-
-    for tag in soup.find_all(["script", "noscript"]):
-        tag.decompose()
-
-    # Preserva imagens e ajusta caminhos relativos
-    for img in soup.find_all("img"):
-        src = img.get("src", "")
-        if src and not src.startswith(("http://", "https://", "data:", "file://")):
-            img_path = (arquivo_base.parent / src).resolve()
-            if img_path.exists():
-                img["src"] = img_path.as_uri()
-
-    body = soup.body if soup.body else soup
-    return str(body)
-
-
-def converter_epub_pdf_rapido(entrada, saida):
-    """
-    Conversão rápida EPUB -> PDF sem usar Calibre.
-    Evita travamento do Calibre no Railway.
-    """
-    if HTML is None:
-        raise Exception(
-            "WeasyPrint não está instalado. Adicione 'weasyprint' no requirements.txt "
-            "ou use outro formato de saída."
-        )
-
-    pasta = None
+    temp_limpo = TEMP_DIR / f"limpo_cirurgico_{uuid.uuid4().hex}.epub"
 
     try:
-        pasta, htmls = extrair_htmls_epub_ordenado(entrada)
-
-        if not htmls:
-            raise Exception("Não encontrei capítulos HTML dentro do EPUB.")
-
-        partes = []
-
-        for h in htmls:
-            try:
-                conteudo = h.read_text(encoding="utf-8", errors="ignore")
-                partes.append(preparar_html_para_pdf(conteudo, h))
-            except Exception:
-                pass
-
-        if not partes:
-            raise Exception("Não consegui preparar o conteúdo do EPUB para PDF.")
-
-        html_final = """<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-@page { size: A5; margin: 16mm; }
-body {
-    font-family: serif;
-    font-size: 13.5pt;
-    line-height: 1.35;
-    text-align: justify;
-}
-h1, h2, h3, h4 {
-    text-align: center;
-    page-break-before: always;
-}
-img {
-    max-width: 100%;
-    height: auto;
-    display: block;
-    margin: 1em auto;
-}
-p { margin: 0 0 .75em 0; }
-.chapter-break { page-break-after: always; }
-</style>
-</head>
-<body>
-""" + "\n<div class='chapter-break'></div>\n".join(partes) + """
-</body>
-</html>"""
-
-        HTML(string=html_final, base_url=str(pasta)).write_pdf(str(saida))
+        alterados = copiar_epub_com_limpeza_cirurgica(entrada, temp_limpo)
+        reparar_epub_com_calibre(temp_limpo, saida)
 
         if not Path(saida).exists() or Path(saida).stat().st_size == 0:
-            raise Exception("O PDF rápido não foi criado.")
+            raise Exception("A limpeza terminou, mas o EPUB final não foi criado.")
 
-        return Path(saida)
+        return alterados
 
     finally:
-        if pasta:
-            shutil.rmtree(pasta, ignore_errors=True)
+        try:
+            Path(temp_limpo).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
-def pode_usar_pdf_rapido(entrada, formato_saida):
-    return Path(entrada).suffix.lower() == ".epub" and str(formato_saida).lower() == "pdf"
+
+
 
 
 def ebook_convert_disponivel():
@@ -1059,9 +796,9 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         msg = await query.message.reply_text("🔄 Preparando conversão...")
         try:
-            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 15, f"📥 Entrada: {formato_entrada.upper()}\n✨ Saída: {formato_saida.upper()}\n\nPreparando conversão...")
+            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 15, f"📥 Entrada: {formato_entrada.upper()}\n✨ Saída: {formato_saida.upper()}\n\nPreparando Calibre...")
             saida = TEMP_DIR / nome_saida_convertido(nome_original, formato_saida)
-            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...\n\n⏳ Se for EPUB → PDF, uso modo rápido. Nos outros formatos, uso Calibre.")
+            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...\n\n⏳ Conversão iniciada. Aguarde o Calibre finalizar.")
             saida = await converter_com_progresso(entrada, saida, formato_saida, msg, formato_entrada)
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 85, "📦 Preparando arquivo convertido para envio...")
             with open(saida, "rb") as f:
@@ -1200,7 +937,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg,
                 "🛠 Limpando EPUB",
                 45,
-                "🧹 Removendo links e sujeiras..."
+                "🧹 Limpando links e preparando reparo do EPUB..."
             )
 
             alterados = await asyncio.to_thread(limpar_epub_rapido, entrada, saida)
@@ -1209,7 +946,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg,
                 "🛠 Limpando EPUB",
                 85,
-                "📦 EPUB limpo criado. Preparando envio..."
+                "📦 EPUB limpo e reparado. Preparando envio..."
             )
 
             tamanho_mb = Path(saida).stat().st_size / (1024 * 1024)
@@ -1224,7 +961,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(saida, "rb") as f:
                 await update.message.reply_document(
                     document=InputFile(f, filename=nome_epub(nome_original)),
-                    caption=f"✅ EPUB limpo em modo ultra seguro.\n🧹 Arquivos internos ajustados: {alterados}\n📚 Estrutura, imagens e encryption.xml preservados.",
+                    caption=f"✅ EPUB limpo e reparado pelo Alma Scriptum.\n🧹 Arquivos internos ajustados: {alterados}\n📚 Reparo EPUB aplicado para melhorar compatibilidade.",
                     read_timeout=600,
                     write_timeout=600,
                     connect_timeout=180,
@@ -1382,7 +1119,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — limpeza tag-segura preservando imagens")
+    print("✅ Alma Scriptum Studio ONLINE — limpeza com reparo EPUB")
     app.run_polling()
 
 if __name__ == "__main__":
