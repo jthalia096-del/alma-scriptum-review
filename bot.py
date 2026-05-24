@@ -419,12 +419,87 @@ def limpar_nome_arquivo_interno(nome):
     return str(nome).replace("\\", "/")
 
 
+
+def limpar_html_sem_quebrar_estrutura(html):
+    """
+    Limpeza ultra segura:
+    - NÃO reescreve o XHTML com BeautifulSoup;
+    - NÃO remove img/src;
+    - NÃO mexe em OPF/NCX/XML;
+    - só remove textos visíveis/links de propaganda;
+    - troca href sujo por "#", preservando a tag.
+    """
+    if not html:
+        return html
+
+    html = str(html)
+
+    # Remove scripts/noscript inteiros, sem tocar imagens.
+    html = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.I | re.S)
+    html = re.sub(r"<noscript\b[^>]*>.*?</noscript>", "", html, flags=re.I | re.S)
+
+    # Em links <a href="site-sujo">, não apaga a tag/imagem: só neutraliza o href.
+    padrao_href_sujo = (
+        r'(<a\b[^>]*\bhref=["\'])'
+        r'[^"\']*(?:ocean\s*of\s*pdf|oceanofpdf|oceanpdf|z[\s\-_]*library|z[\s\-_]*lib|1lib|libgen|wattpad|img\.wattpad|anna[’\']?s[\s\-_]*archive|t\.me|telegram\.me|discord\.gg)'
+        r'[^"\']*(["\'])'
+    )
+    html = re.sub(padrao_href_sujo, r'\1#\2', html, flags=re.I)
+
+    # Remove URLs/sujeiras quando aparecem como texto.
+    padroes_texto = [
+        r"Ocean\s*of\s*PDF\.?\s*com",
+        r"OceanofPDF\.?\s*com",
+        r"OceanPDF\.?\s*com",
+        r"OceanofPDF",
+        r"Ocean\s*PDF",
+        r"z[\s\-_]*library(?:\.sk|\.org)?",
+        r"z[\s\-_]*lib(?:\.org)?",
+        r"1lib(?:\.sk|\.org)?",
+        r"libgen(?:\.is|\.rs)?",
+        r"anna['’]?s[\s\-_]*archive",
+        r"https?://(?:www\.)?(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad|img\.wattpad|t\.me|telegram\.me|discord\.gg)[^\s<>'\"]*",
+        r"www\.(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad)[^\s<>'\"]*",
+        r"uploaded\s+by\s*:?\s*[^<\n\r]+",
+        r"shared\s+by\s*:?\s*[^<\n\r]+",
+        r"downloaded\s+from\s*:?\s*[^<\n\r]+",
+    ]
+
+    for p in padroes_texto:
+        html = re.sub(p, "", html, flags=re.I)
+
+    # Remove hashes gigantes soltos, mas não mexe em atributos src/href.
+    # Só quando estiver entre tags como texto.
+    html = re.sub(r">(?:\s*[A-Za-z0-9]{60,}\s*)<", "><", html)
+
+    # Limpeza leve de espaços entre tags/texto.
+    html = re.sub(r"\s+([,.!?;:])", r"\1", html)
+    html = re.sub(r"[ \t]{2,}", " ", html)
+
+    return html
+
+
+def limpar_css_sem_quebrar(css):
+    if not css:
+        return css
+
+    css = str(css)
+    # Não remove URLs de fonte/imagem em CSS para não quebrar visual.
+    # Só remove menções textuais óbvias.
+    css = re.sub(r"Ocean\s*of\s*PDF\.?\s*com", "", css, flags=re.I)
+    css = re.sub(r"OceanofPDF\.?\s*com", "", css, flags=re.I)
+    css = re.sub(r"z[\s\-_]*library", "", css, flags=re.I)
+    return css
+
+
 def limpar_epub_rapido(entrada, saida):
     """
-    Limpa EPUB sem quebrar imagens e sem quebrar OPF/NCX/XML.
-    IMPORTANTE:
-    Não limpar .opf/.ncx/.xml com regex de URL, porque esses arquivos têm
-    namespaces obrigatórios com http://. Se remover, alguns apps dão erro de decodificação.
+    Limpeza compatível máxima:
+    - preserva XHTML original;
+    - preserva imagens;
+    - preserva OPF/NCX/XML;
+    - regrava EPUB com mimetype correto;
+    - evita erro de decodificação em leitores exigentes.
     """
     alterados = 0
     arquivos = {}
@@ -441,11 +516,11 @@ def limpar_epub_rapido(entrada, saida):
                 alterados += 1
                 continue
 
-            # Só limpa capítulos HTML. Preserva imagens e estrutura.
+            # Só mexe em capítulos HTML/XHTML/HTM, preservando a estrutura original.
             if nome_lower.endswith((".html", ".xhtml", ".htm")):
                 try:
                     texto = data.decode("utf-8", errors="ignore")
-                    novo = limpar_html_pesado(texto)
+                    novo = limpar_html_sem_quebrar_estrutura(texto)
 
                     if novo != texto:
                         alterados += 1
@@ -454,11 +529,11 @@ def limpar_epub_rapido(entrada, saida):
                 except Exception:
                     pass
 
-            # CSS pode ser limpo, mas sem destruir o EPUB se der erro.
+            # CSS: limpeza mínima.
             elif nome_lower.endswith(".css"):
                 try:
                     texto = data.decode("utf-8", errors="ignore")
-                    novo = limpar_texto_pesado(texto)
+                    novo = limpar_css_sem_quebrar(texto)
 
                     if novo != texto:
                         alterados += 1
@@ -467,7 +542,7 @@ def limpar_epub_rapido(entrada, saida):
                 except Exception:
                     pass
 
-            # .opf/.ncx/.xml ficam intactos para manter compatibilidade.
+            # OPF/NCX/XML e imagens ficam intactos.
             arquivos[nome] = data
 
     escrever_epub_valido(saida, arquivos)
@@ -476,6 +551,7 @@ def limpar_epub_rapido(entrada, saida):
         raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
 
     return alterados
+
 
 
 
@@ -988,7 +1064,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(saida, "rb") as f:
                 await update.message.reply_document(
                     document=InputFile(f, filename=nome_epub(nome_original)),
-                    caption=f"✅ EPUB limpo e compatível pelo Alma Scriptum.\n🧹 Arquivos internos ajustados: {alterados}\n📚 Estrutura OPF/NCX preservada.",
+                    caption=f"✅ EPUB limpo em modo compatível máximo.\n🧹 Arquivos internos ajustados: {alterados}\n📚 Estrutura XHTML/OPF/NCX preservada.",
                     read_timeout=600,
                     write_timeout=600,
                     connect_timeout=180,
@@ -1146,7 +1222,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — limpeza compatível + PDF rápido")
+    print("✅ Alma Scriptum Studio ONLINE — EPUB compatível máximo")
     app.run_polling()
 
 if __name__ == "__main__":
