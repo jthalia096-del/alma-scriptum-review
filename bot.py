@@ -5,10 +5,18 @@ import shutil
 import zipfile
 import subprocess
 import asyncio
+from html import escape, unescape
+from html import unescape
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 from bs4 import BeautifulSoup, NavigableString
 from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
+
+try:
+    from weasyprint import HTML
+except Exception:
+    HTML = None
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.error import TimedOut, NetworkError
@@ -27,12 +35,7 @@ cancelamentos = set()
 
 FORMATOS_SAIDA = [
     "PDF", "DOCX", "TXT",
-    "RTF", "MOBI", "AZW3",
-    "LRF", "OEB", "PDB",
-    "FB2", "RB", "EPUB",
-    "HTMLZ", "KEPUB", "LIT",
-    "PMLZ", "SNB", "TCR",
-    "TXTZ", "ZIP",
+    "HTMLZ", "ZIP",
 ]
 
 FORMATOS_ENTRADA = {
@@ -145,42 +148,24 @@ def nome_epub(nome):
 
 
 async def converter_com_progresso(entrada, saida, formato_saida, msg, formato_entrada):
-    tarefa = asyncio.create_task(asyncio.to_thread(rodar_calibre, entrada, saida, formato_saida))
+    await atualizar_carregamento(
+        msg,
+        "🔄 Conversor Alma Scriptum",
+        55,
+        f"⚡ Conversão sem Calibre ativada: {str(formato_entrada).upper()} → {str(formato_saida).upper()}.\n\nMais rápido e leve."
+    )
 
-    progresso = 45
-    tempo_total = 0
+    resultado = await asyncio.to_thread(rodar_conversao_sem_calibre, entrada, saida, formato_saida)
 
-    while not tarefa.done():
-        await asyncio.sleep(20)
-        tempo_total += 20
+    await atualizar_carregamento(
+        msg,
+        "🔄 Conversor Alma Scriptum",
+        85,
+        "📦 Arquivo convertido. Preparando envio..."
+    )
 
-        if tarefa.done():
-            break
+    return resultado
 
-        if progresso < 90:
-            progresso += 3
-
-        await atualizar_carregamento(
-            msg,
-            "🔄 Conversor Alma Scriptum",
-            progresso,
-            (
-                f"⚙️ Convertendo {str(formato_entrada).upper()} para {str(formato_saida).upper()}...\\n\\n"
-                f"⏳ Calibre ainda trabalhando há {tempo_total}s.\\n"
-                "Arquivos grandes podem demorar bastante, principalmente EPUB → PDF."
-            )
-        )
-
-    return await tarefa
-
-
-
-
-def criar_soup_epub(html):
-    """
-    Parser leve para não travar EPUB grande no Railway.
-    """
-    return BeautifulSoup(html, "html.parser")
 
 
 def texto_de_sujeira(texto):
@@ -356,30 +341,82 @@ def limpar_html_pesado(html):
     return str(soup)
 
 
+
+def escrever_epub_valido(saida, arquivos):
+    """
+    Escreve EPUB válido para leitores mais chatos:
+    - mimetype precisa ser o primeiro arquivo;
+    - mimetype precisa ficar SEM compressão;
+    - demais arquivos podem ser comprimidos.
+    """
+    saida = Path(saida)
+
+    with zipfile.ZipFile(saida, "w") as zout:
+        if "mimetype" in arquivos:
+            info = zipfile.ZipInfo("mimetype")
+            info.compress_type = zipfile.ZIP_STORED
+            zout.writestr(info, arquivos["mimetype"])
+        else:
+            info = zipfile.ZipInfo("mimetype")
+            info.compress_type = zipfile.ZIP_STORED
+            zout.writestr(info, b"application/epub+zip")
+
+        for nome, data in arquivos.items():
+            nome_norm = str(nome).replace("\\", "/")
+            if nome_norm == "mimetype":
+                continue
+
+            info = zipfile.ZipInfo(nome_norm)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            zout.writestr(info, data)
+
+    return saida
+
+
+def limpar_nome_arquivo_interno(nome):
+    return str(nome).replace("\\", "/")
+
+
 def limpar_epub_rapido(entrada, saida):
+    """
+    Limpa EPUB sem quebrar imagens e regrava no padrão EPUB correto.
+    Isso corrige erro de decodificação em leitores mais rígidos.
+    """
     alterados = 0
+    arquivos = {}
 
     with zipfile.ZipFile(entrada, "r") as zin:
-        with zipfile.ZipFile(saida, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-            for item in zin.infolist():
-                data = zin.read(item.filename)
-                nome = item.filename.lower()
+        for item in zin.infolist():
+            nome_original = item.filename
+            nome = limpar_nome_arquivo_interno(nome_original)
+            nome_lower = nome.lower()
 
-                if nome.endswith((".html", ".xhtml", ".htm", ".xml", ".opf", ".ncx", ".css")):
-                    try:
-                        texto = data.decode("utf-8", errors="ignore")
-                        if nome.endswith((".html", ".xhtml", ".htm", ".xml", ".opf", ".ncx")):
-                            novo = limpar_html_pesado(texto)
-                        else:
-                            novo = limpar_texto_pesado(texto)
+            data = zin.read(nome_original)
 
-                        if novo != texto:
-                            alterados += 1
-                            data = novo.encode("utf-8", errors="xmlcharrefreplace")
-                    except Exception:
-                        pass
+            if nome_lower == "meta-inf/encryption.xml":
+                # remove DRM/encryption marker problemático
+                alterados += 1
+                continue
 
-                zout.writestr(item, data)
+            if nome_lower.endswith((".html", ".xhtml", ".htm", ".xml", ".opf", ".ncx", ".css")):
+                try:
+                    texto = data.decode("utf-8", errors="ignore")
+
+                    if nome_lower.endswith((".html", ".xhtml", ".htm")):
+                        novo = limpar_html_pesado(texto)
+                    else:
+                        novo = limpar_texto_pesado(texto)
+
+                    if novo != texto:
+                        alterados += 1
+                        data = novo.encode("utf-8", errors="xmlcharrefreplace")
+
+                except Exception:
+                    pass
+
+            arquivos[nome] = data
+
+    escrever_epub_valido(saida, arquivos)
 
     if not Path(saida).exists() or Path(saida).stat().st_size == 0:
         raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
@@ -387,6 +424,473 @@ def limpar_epub_rapido(entrada, saida):
     return alterados
 
 
+
+
+
+
+def extrair_htmls_epub_ordenado(caminho_epub):
+    """
+    Extrai os arquivos HTML/XHTML do EPUB em ordem aproximada.
+    É usado no modo turbo para PDF/TXT.
+    """
+    caminho_epub = Path(caminho_epub)
+    pasta = TEMP_DIR / f"epub_turbo_{uuid.uuid4().hex}"
+    pasta.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(caminho_epub, "r") as zin:
+        zin.extractall(pasta)
+
+    htmls = []
+    for p in pasta.rglob("*"):
+        if p.suffix.lower() in [".xhtml", ".html", ".htm"]:
+            nome = p.name.lower()
+            if nome in ["nav.xhtml", "toc.xhtml", "cover.xhtml"]:
+                # cover/toc às vezes duplicam ou travam visual
+                continue
+            htmls.append(p)
+
+    htmls = sorted(htmls, key=lambda x: str(x).lower())
+    return pasta, htmls
+
+
+def limpar_html_para_pdf(conteudo, arquivo_base):
+    soup = BeautifulSoup(conteudo, "html.parser")
+
+    for tag in soup.find_all(["script", "noscript"]):
+        tag.decompose()
+
+    # Preserva imagens. Só ajusta caminho relativo para file://
+    for img in soup.find_all("img"):
+        src = img.get("src", "")
+        if src and not src.startswith(("http://", "https://", "data:", "file://")):
+            img_path = (arquivo_base.parent / src).resolve()
+            if img_path.exists():
+                img["src"] = img_path.as_uri()
+
+    body = soup.body if soup.body else soup
+    return str(body)
+
+
+def epub_para_pdf_turbo(entrada, saida):
+    """
+    PDF rápido sem Calibre.
+    Muito mais rápido no Railway para EPUB -> PDF.
+    """
+    if HTML is None:
+        raise Exception(
+            "WeasyPrint não está instalado. Coloque 'weasyprint' no requirements.txt "
+            "ou use outro formato de saída."
+        )
+
+    pasta = None
+    try:
+        pasta, htmls = extrair_htmls_epub_ordenado(entrada)
+
+        if not htmls:
+            raise Exception("Não encontrei capítulos HTML dentro do EPUB.")
+
+        partes = []
+        for h in htmls:
+            try:
+                conteudo = h.read_text(encoding="utf-8", errors="ignore")
+                partes.append(limpar_html_para_pdf(conteudo, h))
+            except Exception:
+                pass
+
+        if not partes:
+            raise Exception("Não consegui preparar o conteúdo do EPUB para PDF.")
+
+        html_final = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: A5; margin: 16mm; }
+body {
+    font-family: serif;
+    font-size: 13.5pt;
+    line-height: 1.35;
+    text-align: justify;
+}
+h1, h2, h3, h4 {
+    text-align: center;
+    page-break-before: always;
+}
+img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1em auto;
+}
+p { margin: 0 0 .75em 0; }
+.chapter-break { page-break-after: always; }
+</style>
+</head>
+<body>
+""" + "\n<div class='chapter-break'></div>\n".join(partes) + """
+</body>
+</html>"""
+
+        HTML(string=html_final, base_url=str(pasta)).write_pdf(str(saida))
+
+        if not Path(saida).exists() or Path(saida).stat().st_size == 0:
+            raise Exception("O PDF não foi criado.")
+
+        return Path(saida)
+
+    finally:
+        if pasta:
+            shutil.rmtree(pasta, ignore_errors=True)
+
+
+def epub_para_txt_turbo(entrada, saida):
+    """
+    TXT rápido sem Calibre.
+    """
+    pasta = None
+    try:
+        pasta, htmls = extrair_htmls_epub_ordenado(entrada)
+
+        textos = []
+        for h in htmls:
+            try:
+                soup = BeautifulSoup(h.read_text(encoding="utf-8", errors="ignore"), "html.parser")
+                for tag in soup.find_all(["script", "style", "noscript"]):
+                    tag.decompose()
+                texto = soup.get_text("\n", strip=True)
+                texto = unescape(texto)
+                texto = re.sub(r"\n{3,}", "\n\n", texto)
+                if texto.strip():
+                    textos.append(texto.strip())
+            except Exception:
+                pass
+
+        if not textos:
+            raise Exception("Não consegui extrair texto do EPUB.")
+
+        Path(saida).write_text("\n\n".join(textos), encoding="utf-8")
+        return Path(saida)
+
+    finally:
+        if pasta:
+            shutil.rmtree(pasta, ignore_errors=True)
+
+
+def usar_conversao_turbo(entrada, formato_saida):
+    entrada = Path(entrada)
+    formato_saida = str(formato_saida).lower()
+    return entrada.suffix.lower() == ".epub" and formato_saida in ["pdf", "txt"]
+
+
+def rodar_conversao_turbo(entrada, saida, formato_saida):
+    formato_saida = str(formato_saida).lower()
+
+    if formato_saida == "pdf":
+        return epub_para_pdf_turbo(entrada, saida)
+
+    if formato_saida == "txt":
+        return epub_para_txt_turbo(entrada, saida)
+
+    raise Exception("Formato turbo não suportado.")
+
+
+
+def extrair_htmls_epub_ordenado(caminho_epub):
+    caminho_epub = Path(caminho_epub)
+    pasta = TEMP_DIR / f"epub_turbo_{uuid.uuid4().hex}"
+    pasta.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(caminho_epub, "r") as zin:
+        zin.extractall(pasta)
+
+    htmls = []
+    for p in pasta.rglob("*"):
+        if p.suffix.lower() in [".xhtml", ".html", ".htm"]:
+            nome = p.name.lower()
+            if nome in ["nav.xhtml", "toc.xhtml"]:
+                continue
+            htmls.append(p)
+
+    htmls = sorted(htmls, key=lambda x: str(x).lower())
+    return pasta, htmls
+
+
+def limpar_html_para_pdf(conteudo, arquivo_base):
+    soup = BeautifulSoup(conteudo, "html.parser")
+
+    for tag in soup.find_all(["script", "noscript"]):
+        tag.decompose()
+
+    for img in soup.find_all("img"):
+        src = img.get("src", "")
+        if src and not src.startswith(("http://", "https://", "data:", "file://")):
+            img_path = (arquivo_base.parent / src).resolve()
+            if img_path.exists():
+                img["src"] = img_path.as_uri()
+
+    body = soup.body if soup.body else soup
+    return str(body)
+
+
+def epub_para_pdf_turbo(entrada, saida):
+    if HTML is None:
+        raise Exception("WeasyPrint não está instalado. Coloque weasyprint no requirements.txt.")
+
+    pasta = None
+    try:
+        pasta, htmls = extrair_htmls_epub_ordenado(entrada)
+
+        if not htmls:
+            raise Exception("Não encontrei capítulos HTML dentro do EPUB.")
+
+        partes = []
+        for h in htmls:
+            try:
+                conteudo = h.read_text(encoding="utf-8", errors="ignore")
+                partes.append(limpar_html_para_pdf(conteudo, h))
+            except Exception:
+                pass
+
+        if not partes:
+            raise Exception("Não consegui preparar o conteúdo para PDF.")
+
+        html_final = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: A5; margin: 16mm; }
+body {
+    font-family: serif;
+    font-size: 13.5pt;
+    line-height: 1.35;
+    text-align: justify;
+}
+h1, h2, h3, h4 {
+    text-align: center;
+    page-break-before: always;
+}
+img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1em auto;
+}
+p { margin: 0 0 .75em 0; }
+.chapter-break { page-break-after: always; }
+</style>
+</head>
+<body>
+""" + "\n<div class='chapter-break'></div>\n".join(partes) + """
+</body>
+</html>"""
+
+        HTML(string=html_final, base_url=str(pasta)).write_pdf(str(saida))
+
+        if not Path(saida).exists() or Path(saida).stat().st_size == 0:
+            raise Exception("O PDF não foi criado.")
+
+        return Path(saida)
+
+    finally:
+        if pasta:
+            shutil.rmtree(pasta, ignore_errors=True)
+
+
+def epub_para_txt_turbo(entrada, saida):
+    pasta = None
+    try:
+        pasta, htmls = extrair_htmls_epub_ordenado(entrada)
+
+        textos = []
+        for h in htmls:
+            try:
+                soup = BeautifulSoup(h.read_text(encoding="utf-8", errors="ignore"), "html.parser")
+                for tag in soup.find_all(["script", "style", "noscript"]):
+                    tag.decompose()
+                texto = soup.get_text("\n", strip=True)
+                texto = unescape(texto)
+                texto = re.sub(r"\n{3,}", "\n\n", texto)
+                if texto.strip():
+                    textos.append(texto.strip())
+            except Exception:
+                pass
+
+        if not textos:
+            raise Exception("Não consegui extrair texto do EPUB.")
+
+        Path(saida).write_text("\n\n".join(textos), encoding="utf-8")
+        return Path(saida)
+
+    finally:
+        if pasta:
+            shutil.rmtree(pasta, ignore_errors=True)
+
+
+def epub_para_htmlz_turbo(entrada, saida):
+    pasta = None
+    try:
+        pasta, htmls = extrair_htmls_epub_ordenado(entrada)
+        if not htmls:
+            raise Exception("Não encontrei capítulos HTML dentro do EPUB.")
+
+        partes = []
+        for h in htmls:
+            try:
+                conteudo = h.read_text(encoding="utf-8", errors="ignore")
+                partes.append(limpar_html_para_pdf(conteudo, h))
+            except Exception:
+                pass
+
+        html_final = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Alma Scriptum</title>
+<style>
+body { font-family: serif; line-height: 1.5; max-width: 820px; margin: auto; padding: 30px; }
+img { max-width: 100%; height: auto; display:block; margin: 1em auto; }
+</style>
+</head>
+<body>
+""" + "\n<hr>\n".join(partes) + """
+</body>
+</html>"""
+
+        with zipfile.ZipFile(saida, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+            zout.writestr("index.html", html_final.encode("utf-8"))
+
+            for p in pasta.rglob("*"):
+                if p.is_file() and p.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"]:
+                    try:
+                        arc = "images/" + p.name
+                        zout.write(p, arc)
+                    except Exception:
+                        pass
+
+        return Path(saida)
+
+    finally:
+        if pasta:
+            shutil.rmtree(pasta, ignore_errors=True)
+
+
+def epub_para_zip_turbo(entrada, saida):
+    # ZIP simples com o conteúdo extraído do EPUB.
+    pasta = None
+    try:
+        pasta, _ = extrair_htmls_epub_ordenado(entrada)
+        with zipfile.ZipFile(saida, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+            for p in pasta.rglob("*"):
+                if p.is_file():
+                    zout.write(p, p.relative_to(pasta))
+        return Path(saida)
+    finally:
+        if pasta:
+            shutil.rmtree(pasta, ignore_errors=True)
+
+
+def criar_docx_simples(textos, saida):
+    """
+    Cria DOCX básico sem depender de python-docx.
+    DOCX é um ZIP com XML interno.
+    """
+    paragraphs = []
+    for bloco in textos:
+        for linha in str(bloco).splitlines():
+            linha = linha.strip()
+            if not linha:
+                paragraphs.append("<w:p/>")
+            else:
+                paragraphs.append(
+                    "<w:p><w:r><w:t xml:space=\"preserve\">"
+                    + xml_escape(linha)
+                    + "</w:t></w:r></w:p>"
+                )
+
+    document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+""" + "\n".join(paragraphs) + """
+<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+</w:body>
+</w:document>"""
+
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"""
+
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+
+    with zipfile.ZipFile(saida, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        zout.writestr("[Content_Types].xml", content_types)
+        zout.writestr("_rels/.rels", rels)
+        zout.writestr("word/document.xml", document_xml)
+
+    return Path(saida)
+
+
+def epub_para_docx_turbo(entrada, saida):
+    pasta = None
+    try:
+        pasta, htmls = extrair_htmls_epub_ordenado(entrada)
+
+        textos = []
+        for h in htmls:
+            try:
+                soup = BeautifulSoup(h.read_text(encoding="utf-8", errors="ignore"), "html.parser")
+                for tag in soup.find_all(["script", "style", "noscript"]):
+                    tag.decompose()
+                texto = soup.get_text("\n", strip=True)
+                texto = unescape(texto)
+                texto = re.sub(r"\n{3,}", "\n\n", texto)
+                if texto.strip():
+                    textos.append(texto.strip())
+            except Exception:
+                pass
+
+        if not textos:
+            raise Exception("Não consegui extrair texto do EPUB.")
+
+        return criar_docx_simples(textos, saida)
+
+    finally:
+        if pasta:
+            shutil.rmtree(pasta, ignore_errors=True)
+
+
+def rodar_conversao_sem_calibre(entrada, saida, formato_saida):
+    entrada = Path(entrada)
+    formato_saida = str(formato_saida).lower()
+
+    if entrada.suffix.lower() != ".epub":
+        raise Exception(
+            "Modo sem Calibre ativado. No momento, conversão sem Calibre funciona para entrada EPUB. "
+            "Envie EPUB para converter em PDF, DOCX, TXT, HTMLZ ou ZIP."
+        )
+
+    if formato_saida == "pdf":
+        return epub_para_pdf_turbo(entrada, saida)
+
+    if formato_saida == "txt":
+        return epub_para_txt_turbo(entrada, saida)
+
+    if formato_saida == "docx":
+        return epub_para_docx_turbo(entrada, saida)
+
+    if formato_saida == "htmlz":
+        return epub_para_htmlz_turbo(entrada, saida)
+
+    if formato_saida == "zip":
+        return epub_para_zip_turbo(entrada, saida)
+
+    raise Exception("Formato sem Calibre não suportado. Use PDF, DOCX, TXT, HTMLZ ou ZIP.")
 
 
 def ebook_convert_disponivel():
@@ -612,7 +1116,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 15, f"📥 Entrada: {formato_entrada.upper()}\n✨ Saída: {formato_saida.upper()}\n\nPreparando Calibre...")
             saida = TEMP_DIR / nome_saida_convertido(nome_original, formato_saida)
-            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...\n\n⏳ Conversão iniciada. Aguarde o Calibre finalizar.")
+            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...\n\n⏳ Conversão sem Calibre iniciada.")
             saida = await converter_com_progresso(entrada, saida, formato_saida, msg, formato_entrada)
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 85, "📦 Preparando arquivo convertido para envio...")
             with open(saida, "rb") as f:
@@ -731,7 +1235,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if modo == "conversor_aguardando":
             formato, descricao = detectar_formato(nome_original)
             if not formato or f".{formato.lower()}" not in FORMATOS_ENTRADA:
-                await update.message.reply_text("⚠️ Formato não reconhecido. Envie EPUB, PDF, MOBI, AZW3, DOCX, TXT, RTF, FB2, HTMLZ, KEPUB, LIT, LRF, PDB, PMLZ, RB, SNB, TCR, TXTZ, ZIP, KFX, KFX-ZIP ou OEB.")
+                await update.message.reply_text("⚠️ Modo sem Calibre: envie EPUB. Saídas disponíveis: PDF, DOCX, TXT, HTMLZ ou ZIP.")
                 entrada.unlink(missing_ok=True)
                 return
             usuarios[user_id]["conv_entrada"] = str(entrada)
@@ -775,7 +1279,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(saida, "rb") as f:
                 await update.message.reply_document(
                     document=InputFile(f, filename=nome_epub(nome_original)),
-                    caption=f"✅ EPUB limpo pelo Alma Scriptum.\n🧹 Arquivos internos ajustados: {alterados}",
+                    caption=f"✅ EPUB limpo e normalizado pelo Alma Scriptum.\n🧹 Arquivos internos ajustados: {alterados}",
                     read_timeout=600,
                     write_timeout=600,
                     connect_timeout=180,
@@ -933,7 +1437,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — limpeza segura com envio reforçado")
+    print("✅ Alma Scriptum Studio ONLINE — conversor 100% sem Calibre")
     app.run_polling()
 
 if __name__ == "__main__":
