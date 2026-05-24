@@ -178,12 +178,9 @@ async def converter_com_progresso(entrada, saida, formato_saida, msg, formato_en
 
 def criar_soup_epub(html):
     """
-    Tenta usar lxml quando existir, mas não quebra se Railway não tiver lxml.
+    Parser leve para não travar EPUB grande no Railway.
     """
-    try:
-        return BeautifulSoup(html, "lxml")
-    except Exception:
-        return BeautifulSoup(html, "html.parser")
+    return BeautifulSoup(html, "html.parser")
 
 
 def texto_de_sujeira(texto):
@@ -619,7 +616,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             saida = await converter_com_progresso(entrada, saida, formato_saida, msg, formato_entrada)
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 85, "📦 Preparando arquivo convertido para envio...")
             with open(saida, "rb") as f:
-                await query.message.reply_document(document=InputFile(f, filename=nome_saida_convertido(nome_original, formato_saida)), caption=f"✅ Conversão concluída: {formato_entrada.upper()} → {formato_saida.upper()}", read_timeout=300, write_timeout=300, connect_timeout=120, pool_timeout=120)
+                await query.message.reply_document(document=InputFile(f, filename=nome_saida_convertido(nome_original, formato_saida)), caption=f"✅ Conversão concluída: {formato_entrada.upper()} → {formato_saida.upper()}", read_timeout=600, write_timeout=600, connect_timeout=180, pool_timeout=180)
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 100, "✅ Conversão concluída e enviada.")
             try:
                 Path(saida).unlink(missing_ok=True)
@@ -692,7 +689,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remover_varias_imagens_epub(entrada, saida, nomes_para_remover)
         await atualizar_carregamento(msg, "🖼 Editor de capa", 85, "📦 Preparando EPUB atualizado...")
         with open(saida, "rb") as f:
-            await query.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Edição finalizada. EPUB atualizado.", read_timeout=300, write_timeout=300, connect_timeout=120, pool_timeout=120)
+            await query.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Edição finalizada. EPUB atualizado.", read_timeout=600, write_timeout=600, connect_timeout=180, pool_timeout=180)
         await atualizar_carregamento(msg, "🖼 Editor de capa", 100, "✅ EPUB editado e enviado.")
         saida.unlink(missing_ok=True)
         limpar_sessao_capa(user_id)
@@ -763,17 +760,26 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg,
                 "🛠 Limpando EPUB",
                 85,
-                "📦 Preparando EPUB limpo..."
+                "📦 EPUB limpo criado. Preparando envio..."
+            )
+
+            tamanho_mb = Path(saida).stat().st_size / (1024 * 1024)
+
+            await atualizar_carregamento(
+                msg,
+                "🛠 Limpando EPUB",
+                90,
+                f"📤 Enviando EPUB limpo...\n\nTamanho: {tamanho_mb:.1f} MB\nSe o arquivo for grande, essa parte pode demorar."
             )
 
             with open(saida, "rb") as f:
                 await update.message.reply_document(
                     document=InputFile(f, filename=nome_epub(nome_original)),
                     caption=f"✅ EPUB limpo pelo Alma Scriptum.\n🧹 Arquivos internos ajustados: {alterados}",
-                    read_timeout=300,
-                    write_timeout=300,
-                    connect_timeout=120,
-                    pool_timeout=120,
+                    read_timeout=600,
+                    write_timeout=600,
+                    connect_timeout=180,
+                    pool_timeout=180,
                 )
 
             await atualizar_carregamento(
@@ -812,7 +818,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await atualizar_carregamento(msg, titulo, 100, "✅ Imagens enviadas.")
             return
     except (TimedOut, NetworkError):
-        await update.message.reply_text("⚠️ O Telegram demorou responder. Se o arquivo apareceu acima, está tudo certo.")
+        await update.message.reply_text("⚠️ O Telegram demorou para enviar/responder. Se o arquivo não apareceu, tente enviar um EPUB menor ou rode a limpeza novamente.")
     except Exception as erro:
         await update.message.reply_text(f"❌ Erro:\n{erro}")
     finally:
@@ -856,7 +862,7 @@ async def receber_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trocar_imagem_epub(entrada, saida, nome_imagem, nova_bytes)
         await atualizar_carregamento(msg, "🔁 Trocando imagem", 90, "📦 Preparando EPUB atualizado...")
         with open(saida, "rb") as f:
-            await update.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Imagem trocada e EPUB atualizado.", read_timeout=300, write_timeout=300, connect_timeout=120, pool_timeout=120)
+            await update.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Imagem trocada e EPUB atualizado.", read_timeout=600, write_timeout=600, connect_timeout=180, pool_timeout=180)
         await atualizar_carregamento(msg, "🔁 Trocando imagem", 100, "✅ Imagem trocada e enviada.")
     except Exception as erro:
         await update.message.reply_text(f"❌ Erro ao trocar imagem:\n{erro}")
@@ -899,7 +905,7 @@ async def receber_documento_imagem(update: Update, context: ContextTypes.DEFAULT
         trocar_imagem_epub(entrada, saida, imagens[indice], nova_bytes)
         await atualizar_carregamento(msg, "🔁 Trocando imagem", 90, "📦 Preparando EPUB atualizado...")
         with open(saida, "rb") as f:
-            await update.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Imagem trocada e EPUB atualizado.", read_timeout=300, write_timeout=300, connect_timeout=120, pool_timeout=120)
+            await update.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Imagem trocada e EPUB atualizado.", read_timeout=600, write_timeout=600, connect_timeout=180, pool_timeout=180)
         await atualizar_carregamento(msg, "🔁 Trocando imagem", 100, "✅ Imagem trocada e enviada.")
     except Exception as erro:
         await update.message.reply_text(f"❌ Erro ao trocar imagem:\n{erro}")
@@ -927,7 +933,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — Conversor estável + capa + limpeza segura sem apagar imagens")
+    print("✅ Alma Scriptum Studio ONLINE — limpeza segura com envio reforçado")
     app.run_polling()
 
 if __name__ == "__main__":
