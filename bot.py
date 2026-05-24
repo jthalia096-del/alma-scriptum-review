@@ -5,10 +5,16 @@ import shutil
 import zipfile
 import subprocess
 import asyncio
+from html import unescape
 from pathlib import Path
 
 from bs4 import BeautifulSoup, NavigableString
 from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
+
+try:
+    from weasyprint import HTML
+except Exception:
+    HTML = None
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.error import TimedOut, NetworkError
@@ -145,6 +151,28 @@ def nome_epub(nome):
 
 
 async def converter_com_progresso(entrada, saida, formato_saida, msg, formato_entrada):
+    entrada = Path(entrada)
+    formato_saida = str(formato_saida).lower()
+
+    if pode_usar_pdf_rapido(entrada, formato_saida):
+        await atualizar_carregamento(
+            msg,
+            "🔄 Conversor Alma Scriptum",
+            50,
+            "⚡ Convertendo EPUB para PDF em modo rápido...\n\nSem usar o Calibre pesado."
+        )
+
+        resultado = await asyncio.to_thread(converter_epub_pdf_rapido, entrada, saida)
+
+        await atualizar_carregamento(
+            msg,
+            "🔄 Conversor Alma Scriptum",
+            85,
+            "📦 PDF criado. Preparando envio..."
+        )
+
+        return resultado
+
     tarefa = asyncio.create_task(asyncio.to_thread(rodar_calibre, entrada, saida, formato_saida))
 
     progresso = 45
@@ -165,14 +193,13 @@ async def converter_com_progresso(entrada, saida, formato_saida, msg, formato_en
             "🔄 Conversor Alma Scriptum",
             progresso,
             (
-                f"⚙️ Convertendo {str(formato_entrada).upper()} para {str(formato_saida).upper()}...\\n\\n"
-                f"⏳ Calibre ainda trabalhando há {tempo_total}s.\\n"
-                "Arquivos grandes podem demorar bastante, principalmente EPUB → PDF."
+                f"⚙️ Convertendo {str(formato_entrada).upper()} para {str(formato_saida).upper()}...\n\n"
+                f"⏳ Calibre ainda trabalhando há {tempo_total}s.\n"
+                "PDF de EPUB usa modo rápido. Outros formatos continuam no Calibre."
             )
         )
 
     return await tarefa
-
 
 
 
@@ -442,6 +469,126 @@ def limpar_epub_rapido(entrada, saida):
 
 
 
+
+def extrair_htmls_epub_ordenado(caminho_epub):
+    """
+    Extrai HTML/XHTML do EPUB para conversão rápida em PDF.
+    """
+    caminho_epub = Path(caminho_epub)
+    pasta = TEMP_DIR / f"epub_pdf_{uuid.uuid4().hex}"
+    pasta.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(caminho_epub, "r") as zin:
+        zin.extractall(pasta)
+
+    htmls = []
+    for p in pasta.rglob("*"):
+        if p.suffix.lower() in [".xhtml", ".html", ".htm"]:
+            nome = p.name.lower()
+            if nome in ["nav.xhtml", "toc.xhtml"]:
+                continue
+            htmls.append(p)
+
+    htmls = sorted(htmls, key=lambda x: str(x).lower())
+    return pasta, htmls
+
+
+def preparar_html_para_pdf(conteudo, arquivo_base):
+    soup = BeautifulSoup(conteudo, "html.parser")
+
+    for tag in soup.find_all(["script", "noscript"]):
+        tag.decompose()
+
+    # Preserva imagens e ajusta caminhos relativos
+    for img in soup.find_all("img"):
+        src = img.get("src", "")
+        if src and not src.startswith(("http://", "https://", "data:", "file://")):
+            img_path = (arquivo_base.parent / src).resolve()
+            if img_path.exists():
+                img["src"] = img_path.as_uri()
+
+    body = soup.body if soup.body else soup
+    return str(body)
+
+
+def converter_epub_pdf_rapido(entrada, saida):
+    """
+    Conversão rápida EPUB -> PDF sem usar Calibre.
+    Evita travamento do Calibre no Railway.
+    """
+    if HTML is None:
+        raise Exception(
+            "WeasyPrint não está instalado. Adicione 'weasyprint' no requirements.txt "
+            "ou use outro formato de saída."
+        )
+
+    pasta = None
+
+    try:
+        pasta, htmls = extrair_htmls_epub_ordenado(entrada)
+
+        if not htmls:
+            raise Exception("Não encontrei capítulos HTML dentro do EPUB.")
+
+        partes = []
+
+        for h in htmls:
+            try:
+                conteudo = h.read_text(encoding="utf-8", errors="ignore")
+                partes.append(preparar_html_para_pdf(conteudo, h))
+            except Exception:
+                pass
+
+        if not partes:
+            raise Exception("Não consegui preparar o conteúdo do EPUB para PDF.")
+
+        html_final = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@page { size: A5; margin: 16mm; }
+body {
+    font-family: serif;
+    font-size: 13.5pt;
+    line-height: 1.35;
+    text-align: justify;
+}
+h1, h2, h3, h4 {
+    text-align: center;
+    page-break-before: always;
+}
+img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1em auto;
+}
+p { margin: 0 0 .75em 0; }
+.chapter-break { page-break-after: always; }
+</style>
+</head>
+<body>
+""" + "\n<div class='chapter-break'></div>\n".join(partes) + """
+</body>
+</html>"""
+
+        HTML(string=html_final, base_url=str(pasta)).write_pdf(str(saida))
+
+        if not Path(saida).exists() or Path(saida).stat().st_size == 0:
+            raise Exception("O PDF rápido não foi criado.")
+
+        return Path(saida)
+
+    finally:
+        if pasta:
+            shutil.rmtree(pasta, ignore_errors=True)
+
+
+def pode_usar_pdf_rapido(entrada, formato_saida):
+    return Path(entrada).suffix.lower() == ".epub" and str(formato_saida).lower() == "pdf"
+
+
 def ebook_convert_disponivel():
     return shutil.which("ebook-convert") is not None
 
@@ -663,9 +810,9 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         msg = await query.message.reply_text("🔄 Preparando conversão...")
         try:
-            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 15, f"📥 Entrada: {formato_entrada.upper()}\n✨ Saída: {formato_saida.upper()}\n\nPreparando Calibre...")
+            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 15, f"📥 Entrada: {formato_entrada.upper()}\n✨ Saída: {formato_saida.upper()}\n\nPreparando conversão...")
             saida = TEMP_DIR / nome_saida_convertido(nome_original, formato_saida)
-            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...\n\n⏳ Conversão iniciada. Aguarde o Calibre finalizar.")
+            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...\n\n⏳ Se for EPUB → PDF, uso modo rápido. Nos outros formatos, uso Calibre.")
             saida = await converter_com_progresso(entrada, saida, formato_saida, msg, formato_entrada)
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 85, "📦 Preparando arquivo convertido para envio...")
             with open(saida, "rb") as f:
@@ -986,7 +1133,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — limpeza segura + EPUB normalizado")
+    print("✅ Alma Scriptum Studio ONLINE — PDF rápido + Calibre para outros formatos")
     app.run_polling()
 
 if __name__ == "__main__":
