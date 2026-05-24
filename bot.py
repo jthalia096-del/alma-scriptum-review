@@ -556,11 +556,11 @@ def detectar_encoding_xml(data):
 
 def limpar_epub_rapido(entrada, saida):
     """
-    Limpeza em modo compatibilidade real:
-    - preserva o ZIP original;
-    - preserva mimetype original;
-    - preserva ordem dos arquivos;
-    - preserva OPF/NCX/XML/CSS/imagens;
+    Limpeza ultra segura:
+    - NÃO remove encryption.xml;
+    - NÃO mexe em OPF/NCX/XML/CSS/imagens;
+    - NÃO reconstrói o EPUB do zero;
+    - preserva ZipInfo original;
     - só limpa HTML/XHTML/HTM de forma cirúrgica.
     """
     alterados = 0
@@ -570,6 +570,9 @@ def limpar_epub_rapido(entrada, saida):
             for item in zin.infolist():
                 data = zin.read(item.filename)
                 nome_lower = item.filename.replace("\\", "/").lower()
+
+                # NÃO remover encryption.xml. Alguns leitores precisam dele.
+                # NÃO mexer em OPF/NCX/XML/CSS/imagens.
 
                 if nome_lower.endswith((".html", ".xhtml", ".htm")):
                     try:
@@ -584,13 +587,13 @@ def limpar_epub_rapido(entrada, saida):
                     except Exception:
                         pass
 
-                # Mantém ZipInfo original: compressão, ordem, flags, data etc.
                 zout.writestr(item, data)
 
     if not Path(saida).exists() or Path(saida).stat().st_size == 0:
         raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
 
     return alterados
+
 
 
 
@@ -1105,7 +1108,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(saida, "rb") as f:
                 await update.message.reply_document(
                     document=InputFile(f, filename=nome_epub(nome_original)),
-                    caption=f"✅ EPUB limpo em modo cirúrgico.\n🧹 Arquivos internos ajustados: {alterados}\n📚 ZIP/OPF/NCX/imagens preservados.",
+                    caption=f"✅ EPUB limpo em modo ultra seguro.\n🧹 Arquivos internos ajustados: {alterados}\n📚 Estrutura, imagens e encryption.xml preservados.",
                     read_timeout=600,
                     write_timeout=600,
                     connect_timeout=180,
@@ -1263,7 +1266,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — limpeza cirúrgica preservando EPUB original")
+    print("✅ Alma Scriptum Studio ONLINE — limpeza ultra segura sem remover encryption.xml")
     app.run_polling()
 
 if __name__ == "__main__":
