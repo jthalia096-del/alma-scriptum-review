@@ -554,45 +554,161 @@ def detectar_encoding_xml(data):
     return "utf-8"
 
 
+
+def limpar_texto_visivel_sem_mexer_tags(trecho):
+    if not trecho:
+        return trecho
+
+    padroes = [
+        r"Ocean\s*of\s*PDF\.?\s*com",
+        r"OceanofPDF\.?\s*com",
+        r"OceanPDF\.?\s*com",
+        r"OceanofPDF",
+        r"Ocean\s*PDF",
+        r"z[\s\-_]*library(?:\.sk|\.org)?",
+        r"z[\s\-_]*lib(?:\.org)?",
+        r"1lib(?:\.sk|\.org)?",
+        r"libgen(?:\.is|\.rs)?",
+        r"anna['’]?s[\s\-_]*archive",
+        r"https?://(?:www\.)?(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad|img\.wattpad|t\.me|telegram\.me|discord\.gg)[^\s<>'\"]*",
+        r"www\.(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad)[^\s<>'\"]*",
+        r"uploaded\s+by\s*:?\s*[^<\n\r]+",
+        r"shared\s+by\s*:?\s*[^<\n\r]+",
+        r"downloaded\s+from\s*:?\s*[^<\n\r]+",
+    ]
+
+    novo = str(trecho)
+
+    for p in padroes:
+        novo = re.sub(p, "", novo, flags=re.I)
+
+    novo = re.sub(r"\b[A-Za-z0-9]{90,}\b", "", novo)
+    novo = re.sub(r"[ \t]{2,}", " ", novo)
+
+    return novo
+
+
+def limpar_html_sem_quebrar_tags(html):
+    if not html:
+        return html
+
+    partes = re.split(r"(<[^>]+>)", str(html))
+    saida = []
+    dentro_script = False
+    dentro_style = False
+
+    for parte in partes:
+        if not parte:
+            continue
+
+        if parte.startswith("<") and parte.endswith(">"):
+            tag_lower = parte.lower()
+
+            if re.match(r"<\s*script\b", tag_lower):
+                dentro_script = True
+                continue
+            if re.match(r"<\s*/\s*script\s*>", tag_lower):
+                dentro_script = False
+                continue
+
+            if re.match(r"<\s*noscript\b", tag_lower):
+                dentro_script = True
+                continue
+            if re.match(r"<\s*/\s*noscript\s*>", tag_lower):
+                dentro_script = False
+                continue
+
+            if re.match(r"<\s*style\b", tag_lower):
+                dentro_style = True
+                saida.append(parte)
+                continue
+            if re.match(r"<\s*/\s*style\s*>", tag_lower):
+                dentro_style = False
+                saida.append(parte)
+                continue
+
+            saida.append(parte)
+            continue
+
+        if dentro_script:
+            continue
+
+        if dentro_style:
+            saida.append(parte)
+            continue
+
+        saida.append(limpar_texto_visivel_sem_mexer_tags(parte))
+
+    return "".join(saida)
+
+
+def detectar_encoding_xml(data):
+    amostra = data[:300].decode("ascii", errors="ignore")
+    m = re.search(r'encoding=["\']([^"\']+)["\']', amostra, flags=re.I)
+    if m:
+        return m.group(1)
+    return "utf-8"
+
+
+def escrever_epub_preservando_mimetype(saida, entradas):
+    saida = Path(saida)
+
+    with zipfile.ZipFile(saida, "w") as zout:
+        mimetype_data = None
+        outros = []
+
+        for item, data in entradas:
+            nome = item.filename.replace("\\", "/")
+            if nome == "mimetype":
+                mimetype_data = data
+            else:
+                outros.append((item, data))
+
+        info = zipfile.ZipInfo("mimetype")
+        info.compress_type = zipfile.ZIP_STORED
+        zout.writestr(info, mimetype_data or b"application/epub+zip")
+
+        for item, data in outros:
+            item.filename = item.filename.replace("\\", "/")
+            if item.filename == "mimetype":
+                continue
+            item.compress_type = zipfile.ZIP_DEFLATED
+            zout.writestr(item, data)
+
+    return saida
+
+
 def limpar_epub_rapido(entrada, saida):
-    """
-    Limpeza ultra segura:
-    - NÃO remove encryption.xml;
-    - NÃO mexe em OPF/NCX/XML/CSS/imagens;
-    - NÃO reconstrói o EPUB do zero;
-    - preserva ZipInfo original;
-    - só limpa HTML/XHTML/HTM de forma cirúrgica.
-    """
     alterados = 0
+    entradas = []
 
     with zipfile.ZipFile(entrada, "r") as zin:
-        with zipfile.ZipFile(saida, "w") as zout:
-            for item in zin.infolist():
-                data = zin.read(item.filename)
-                nome_lower = item.filename.replace("\\", "/").lower()
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            nome_lower = item.filename.replace("\\", "/").lower()
 
-                # NÃO remover encryption.xml. Alguns leitores precisam dele.
-                # NÃO mexer em OPF/NCX/XML/CSS/imagens.
+            if nome_lower.endswith((".html", ".xhtml", ".htm")):
+                try:
+                    enc = detectar_encoding_xml(data)
+                    texto = data.decode(enc, errors="ignore")
+                    novo = limpar_html_sem_quebrar_tags(texto)
 
-                if nome_lower.endswith((".html", ".xhtml", ".htm")):
-                    try:
-                        enc = detectar_encoding_xml(data)
-                        texto = data.decode(enc, errors="ignore")
-                        novo = limpar_html_cirurgico(texto)
+                    if novo != texto:
+                        alterados += 1
+                        data = novo.encode(enc, errors="xmlcharrefreplace")
 
-                        if novo != texto:
-                            alterados += 1
-                            data = novo.encode(enc, errors="xmlcharrefreplace")
+                except Exception:
+                    pass
 
-                    except Exception:
-                        pass
+            entradas.append((item, data))
 
-                zout.writestr(item, data)
+    escrever_epub_preservando_mimetype(saida, entradas)
 
     if not Path(saida).exists() or Path(saida).stat().st_size == 0:
         raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
 
     return alterados
+
 
 
 
@@ -1266,7 +1382,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — limpeza ultra segura sem remover encryption.xml")
+    print("✅ Alma Scriptum Studio ONLINE — limpeza tag-segura preservando imagens")
     app.run_polling()
 
 if __name__ == "__main__":
