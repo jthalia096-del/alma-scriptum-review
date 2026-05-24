@@ -7,7 +7,7 @@ import subprocess
 import asyncio
 from pathlib import Path
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
@@ -175,6 +175,17 @@ async def converter_com_progresso(entrada, saida, formato_saida, msg, formato_en
 
 
 
+
+def criar_soup_epub(html):
+    """
+    Tenta usar lxml quando existir, mas não quebra se Railway não tiver lxml.
+    """
+    try:
+        return BeautifulSoup(html, "lxml")
+    except Exception:
+        return BeautifulSoup(html, "html.parser")
+
+
 def texto_de_sujeira(texto):
     if not texto:
         return False
@@ -251,31 +262,67 @@ def limpar_texto_pesado(texto):
 
 
 def limpar_html_pesado(html):
-    soup = BeautifulSoup(html, "html.parser")
+    """
+    Limpeza pesada, mas segura:
+    - remove OceanofPDF, z-library, Wattpad links e URLs gigantes;
+    - NÃO remove imagens/personagens/capas internas;
+    - não apaga bloco inteiro se ele tiver imagem;
+    - preserva melhor a estrutura do EPUB.
+    """
+    soup = criar_soup_epub(html)
 
     for tag in soup.find_all(["script", "noscript"]):
         tag.decompose()
 
-    for tag in list(soup.find_all(["p", "div", "span", "a", "font", "center", "small", "em", "i", "b", "strong"])):
+    # Limpa links <a>. Se tiver imagem dentro, preserva a imagem e remove só o link em volta.
+    for tag in list(soup.find_all("a")):
         texto = tag.get_text(" ", strip=True)
+        attrs = " ".join(str(v) for v in tag.attrs.values())
+
+        if texto_de_sujeira(attrs) or texto_de_sujeira(texto):
+            if tag.find(["img", "image"]):
+                tag.unwrap()
+            else:
+                tag.decompose()
+
+    # Limpa tags de texto sem apagar imagem.
+    for tag in list(soup.find_all(["p", "div", "span", "font", "center", "small", "em", "i", "b", "strong"])):
+        texto = tag.get_text(" ", strip=True)
+        attrs = " ".join(str(v) for v in tag.attrs.values())
+        tem_imagem = tag.find(["img", "image"]) is not None
+
+        if texto_de_sujeira(attrs):
+            if tem_imagem:
+                for attr in list(tag.attrs.keys()):
+                    val = str(tag.attrs.get(attr, ""))
+                    if texto_de_sujeira(val):
+                        del tag.attrs[attr]
+            else:
+                tag.decompose()
+            continue
 
         if texto_de_sujeira(texto):
-            tag.decompose()
-            continue
+            texto_limpo = limpar_texto_pesado(texto)
 
+            if tem_imagem:
+                pass
+            elif not texto_limpo or len(texto_limpo.strip()) <= 2:
+                tag.decompose()
+                continue
+
+    # NÃO remove img/image por src do Wattpad. Remove só source suspeito.
+    for tag in list(soup.find_all(["source"])):
         attrs = " ".join(str(v) for v in tag.attrs.values())
         if texto_de_sujeira(attrs):
             tag.decompose()
-            continue
 
-    for tag in list(soup.find_all(["a", "img", "image", "source"])):
-        attrs = " ".join(str(v) for v in tag.attrs.values())
-        if texto_de_sujeira(attrs):
-            tag.decompose()
-
+    # Limpa textos soltos.
     for node in list(soup.find_all(string=True)):
         parent = getattr(node, "parent", None)
         parent_name = getattr(parent, "name", "") if parent else ""
+
+        if parent_name in ["script", "noscript"]:
+            continue
 
         original = str(node)
 
@@ -285,7 +332,13 @@ def limpar_html_pesado(html):
             continue
 
         if texto_de_sujeira(original):
-            node.extract()
+            novo = limpar_texto_pesado(original)
+
+            if novo.strip():
+                node.replace_with(NavigableString(novo))
+            else:
+                node.extract()
+
             continue
 
         novo = limpar_texto_pesado(original)
@@ -295,6 +348,13 @@ def limpar_html_pesado(html):
                 node.replace_with(NavigableString(novo))
             else:
                 node.extract()
+
+    # Remove tags vazias, mas nunca se tiver imagem.
+    for tag in list(soup.find_all(["p", "div", "span", "center", "font", "small"])):
+        if tag.find(["img", "image"]):
+            continue
+        if not tag.get_text(" ", strip=True):
+            tag.decompose()
 
     return str(soup)
 
@@ -318,7 +378,7 @@ def limpar_epub_rapido(entrada, saida):
 
                         if novo != texto:
                             alterados += 1
-                            data = novo.encode("utf-8")
+                            data = novo.encode("utf-8", errors="xmlcharrefreplace")
                     except Exception:
                         pass
 
@@ -477,7 +537,7 @@ def remover_varias_imagens_epub(entrada, saida, nomes_imagens):
     for item in book.get_items_of_type(ITEM_DOCUMENT):
         try:
             html = item.get_content().decode("utf-8", errors="ignore")
-            soup = BeautifulSoup(html, "html.parser")
+            soup = criar_soup_epub(html)
             for img in soup.find_all("img"):
                 src = img.get("src", "")
                 src_limpo = src.replace("\\", "/").split("/")[-1]
@@ -555,7 +615,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 15, f"📥 Entrada: {formato_entrada.upper()}\n✨ Saída: {formato_saida.upper()}\n\nPreparando Calibre...")
             saida = TEMP_DIR / nome_saida_convertido(nome_original, formato_saida)
-            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...\n\n⏳ Modo rápido ativo. Aguarde o Calibre finalizar.")
+            await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 45, f"⚙️ Convertendo {formato_entrada.upper()} para {formato_saida.upper()}...\n\n⏳ Conversão iniciada. Aguarde o Calibre finalizar.")
             saida = await converter_com_progresso(entrada, saida, formato_saida, msg, formato_entrada)
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 85, "📦 Preparando arquivo convertido para envio...")
             with open(saida, "rb") as f:
@@ -867,7 +927,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — Conversor Calibre estável + capa + limpeza pesada")
+    print("✅ Alma Scriptum Studio ONLINE — Conversor estável + capa + limpeza segura sem apagar imagens")
     app.run_polling()
 
 if __name__ == "__main__":
