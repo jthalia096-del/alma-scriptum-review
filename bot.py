@@ -151,32 +151,27 @@ async def converter_com_progresso(entrada, saida, formato_saida, msg, formato_en
     tempo_total = 0
 
     while not tarefa.done():
-        await asyncio.sleep(15)
-        tempo_total += 15
+        await asyncio.sleep(20)
+        tempo_total += 20
 
         if tarefa.done():
             break
 
-        if progresso < 82:
-            progresso += 4
+        if progresso < 90:
+            progresso += 3
 
         await atualizar_carregamento(
             msg,
             "🔄 Conversor Alma Scriptum",
             progresso,
             (
-                f"⚙️ Convertendo {str(formato_entrada).upper()} para {str(formato_saida).upper()}...
-
-"
-                f"⏳ Calibre trabalhando há {tempo_total}s.
-"
-                "Se passar de 10 minutos, eu paro e aviso."
+                f"⚙️ Convertendo {str(formato_entrada).upper()} para {str(formato_saida).upper()}...\\n\\n"
+                f"⏳ Calibre ainda trabalhando há {tempo_total}s.\\n"
+                "Arquivos grandes podem demorar bastante, principalmente EPUB → PDF."
             )
         )
 
     return await tarefa
-
-
 
 
 
@@ -373,14 +368,18 @@ def ambiente_calibre():
     return env
 
 
-def rodar_calibre(entrada, saida, formato_saida, timeout=600):
+def rodar_calibre(entrada, saida, formato_saida, timeout=3600):
     if not ebook_convert_disponivel():
         raise Exception("O comando ebook-convert do Calibre não foi encontrado.")
+
     entrada = Path(entrada)
     saida = Path(saida)
+
     entrada_convertida = limpar_epub_para_calibre(entrada) if entrada.suffix.lower() == ".epub" else entrada
+
     comando_base = ["ebook-convert", str(entrada_convertida), str(saida)]
     formato_saida = formato_saida.lower()
+
     if formato_saida == "pdf":
         comando_base += [
             "--paper-size", "a5",
@@ -388,41 +387,31 @@ def rodar_calibre(entrada, saida, formato_saida, timeout=600):
             "--margin-right", "18",
             "--margin-top", "18",
             "--margin-bottom", "18",
+            "--pdf-default-font-size", "14",
+            "--disable-font-rescaling",
+            "--chapter-mark", "none",
         ]
-    elif formato_saida in ["epub", "mobi", "azw3", "fb2", "lit", "lrf", "pdb", "rb", "snb", "tcr", "txtz", "htmlz", "kepub", "kfx"]:
+
+    elif formato_saida in ["epub", "mobi", "azw3", "fb2", "lit", "lrf", "pdb", "rb", "snb", "tcr", "txtz", "htmlz", "kepub"]:
         comando_base += [
             "--chapter-mark", "none",
         ]
+
     xvfb = shutil.which("xvfb-run")
+
     if xvfb:
         comando = [xvfb, "-a", "--server-args=-screen 0 1024x768x24"] + comando_base
     else:
         comando = comando_base
-    processo = None
 
     try:
-        processo = subprocess.Popen(
+        resultado = subprocess.run(
             comando,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
+            timeout=timeout,
             env=ambiente_calibre(),
         )
-
-        try:
-            stdout, stderr = processo.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            try:
-                processo.kill()
-            except Exception:
-                pass
-
-            try:
-                stdout, stderr = processo.communicate(timeout=20)
-            except Exception:
-                stdout, stderr = "", ""
-
-            raise subprocess.TimeoutExpired(comando, timeout, output=stdout, stderr=stderr)
 
     finally:
         try:
@@ -431,15 +420,14 @@ def rodar_calibre(entrada, saida, formato_saida, timeout=600):
         except Exception:
             pass
 
-    if processo.returncode != 0:
-        erro = (stderr or "")[-2200:] or (stdout or "")[-2200:] or "Falha na conversão."
+    if resultado.returncode != 0:
+        erro = resultado.stderr[-3000:] or resultado.stdout[-3000:] or "Falha na conversão."
         raise Exception(erro)
 
     if not saida.exists() or saida.stat().st_size == 0:
         raise Exception("O Calibre terminou, mas o arquivo convertido não foi criado.")
 
     return saida
-
 
 def pegar_imagens_iniciais(caminho_epub, limite=3):
     book = epub.read_epub(str(caminho_epub))
@@ -571,7 +559,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             saida = await converter_com_progresso(entrada, saida, formato_saida, msg, formato_entrada)
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 85, "📦 Preparando arquivo convertido para envio...")
             with open(saida, "rb") as f:
-                await query.message.reply_document(document=InputFile(f, filename=nome_saida_convertido(nome_original, formato_saida)), caption=f"✅ Conversão concluída: {formato_entrada.upper()} → {formato_saida.upper()}", read_timeout=180, write_timeout=180, connect_timeout=90, pool_timeout=90)
+                await query.message.reply_document(document=InputFile(f, filename=nome_saida_convertido(nome_original, formato_saida)), caption=f"✅ Conversão concluída: {formato_entrada.upper()} → {formato_saida.upper()}", read_timeout=300, write_timeout=300, connect_timeout=120, pool_timeout=120)
             await atualizar_carregamento(msg, "🔄 Conversor Alma Scriptum", 100, "✅ Conversão concluída e enviada.")
             try:
                 Path(saida).unlink(missing_ok=True)
@@ -644,7 +632,7 @@ async def botoes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remover_varias_imagens_epub(entrada, saida, nomes_para_remover)
         await atualizar_carregamento(msg, "🖼 Editor de capa", 85, "📦 Preparando EPUB atualizado...")
         with open(saida, "rb") as f:
-            await query.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Edição finalizada. EPUB atualizado.", read_timeout=180, write_timeout=180, connect_timeout=90, pool_timeout=90)
+            await query.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Edição finalizada. EPUB atualizado.", read_timeout=300, write_timeout=300, connect_timeout=120, pool_timeout=120)
         await atualizar_carregamento(msg, "🖼 Editor de capa", 100, "✅ EPUB editado e enviado.")
         saida.unlink(missing_ok=True)
         limpar_sessao_capa(user_id)
@@ -808,7 +796,7 @@ async def receber_foto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         trocar_imagem_epub(entrada, saida, nome_imagem, nova_bytes)
         await atualizar_carregamento(msg, "🔁 Trocando imagem", 90, "📦 Preparando EPUB atualizado...")
         with open(saida, "rb") as f:
-            await update.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Imagem trocada e EPUB atualizado.", read_timeout=180, write_timeout=180, connect_timeout=90, pool_timeout=90)
+            await update.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Imagem trocada e EPUB atualizado.", read_timeout=300, write_timeout=300, connect_timeout=120, pool_timeout=120)
         await atualizar_carregamento(msg, "🔁 Trocando imagem", 100, "✅ Imagem trocada e enviada.")
     except Exception as erro:
         await update.message.reply_text(f"❌ Erro ao trocar imagem:\n{erro}")
@@ -851,7 +839,7 @@ async def receber_documento_imagem(update: Update, context: ContextTypes.DEFAULT
         trocar_imagem_epub(entrada, saida, imagens[indice], nova_bytes)
         await atualizar_carregamento(msg, "🔁 Trocando imagem", 90, "📦 Preparando EPUB atualizado...")
         with open(saida, "rb") as f:
-            await update.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Imagem trocada e EPUB atualizado.", read_timeout=180, write_timeout=180, connect_timeout=90, pool_timeout=90)
+            await update.message.reply_document(document=InputFile(f, filename=nome_epub(nome_original)), caption="✅ Imagem trocada e EPUB atualizado.", read_timeout=300, write_timeout=300, connect_timeout=120, pool_timeout=120)
         await atualizar_carregamento(msg, "🔁 Trocando imagem", 100, "✅ Imagem trocada e enviada.")
     except Exception as erro:
         await update.message.reply_text(f"❌ Erro ao trocar imagem:\n{erro}")
@@ -879,7 +867,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — Conversor com timeout + capa + limpeza pesada")
+    print("✅ Alma Scriptum Studio ONLINE — Conversor Calibre estável + capa + limpeza pesada")
     app.run_polling()
 
 if __name__ == "__main__":
