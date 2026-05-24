@@ -421,8 +421,10 @@ def limpar_nome_arquivo_interno(nome):
 
 def limpar_epub_rapido(entrada, saida):
     """
-    Limpa EPUB sem quebrar imagens e regrava no padrão EPUB correto.
-    Isso corrige erro de decodificação em leitores mais rígidos.
+    Limpa EPUB sem quebrar imagens e sem quebrar OPF/NCX/XML.
+    IMPORTANTE:
+    Não limpar .opf/.ncx/.xml com regex de URL, porque esses arquivos têm
+    namespaces obrigatórios com http://. Se remover, alguns apps dão erro de decodificação.
     """
     alterados = 0
     arquivos = {}
@@ -436,18 +438,14 @@ def limpar_epub_rapido(entrada, saida):
             data = zin.read(nome_original)
 
             if nome_lower == "meta-inf/encryption.xml":
-                # remove DRM/encryption marker problemático
                 alterados += 1
                 continue
 
-            if nome_lower.endswith((".html", ".xhtml", ".htm", ".xml", ".opf", ".ncx", ".css")):
+            # Só limpa capítulos HTML. Preserva imagens e estrutura.
+            if nome_lower.endswith((".html", ".xhtml", ".htm")):
                 try:
                     texto = data.decode("utf-8", errors="ignore")
-
-                    if nome_lower.endswith((".html", ".xhtml", ".htm")):
-                        novo = limpar_html_pesado(texto)
-                    else:
-                        novo = limpar_texto_pesado(texto)
+                    novo = limpar_html_pesado(texto)
 
                     if novo != texto:
                         alterados += 1
@@ -456,6 +454,20 @@ def limpar_epub_rapido(entrada, saida):
                 except Exception:
                     pass
 
+            # CSS pode ser limpo, mas sem destruir o EPUB se der erro.
+            elif nome_lower.endswith(".css"):
+                try:
+                    texto = data.decode("utf-8", errors="ignore")
+                    novo = limpar_texto_pesado(texto)
+
+                    if novo != texto:
+                        alterados += 1
+                        data = novo.encode("utf-8", errors="xmlcharrefreplace")
+
+                except Exception:
+                    pass
+
+            # .opf/.ncx/.xml ficam intactos para manter compatibilidade.
             arquivos[nome] = data
 
     escrever_epub_valido(saida, arquivos)
@@ -464,6 +476,7 @@ def limpar_epub_rapido(entrada, saida):
         raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
 
     return alterados
+
 
 
 
@@ -975,7 +988,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(saida, "rb") as f:
                 await update.message.reply_document(
                     document=InputFile(f, filename=nome_epub(nome_original)),
-                    caption=f"✅ EPUB limpo e normalizado pelo Alma Scriptum.\n🧹 Arquivos internos ajustados: {alterados}",
+                    caption=f"✅ EPUB limpo e compatível pelo Alma Scriptum.\n🧹 Arquivos internos ajustados: {alterados}\n📚 Estrutura OPF/NCX preservada.",
                     read_timeout=600,
                     write_timeout=600,
                     connect_timeout=180,
@@ -1133,7 +1146,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — PDF rápido + Calibre para outros formatos")
+    print("✅ Alma Scriptum Studio ONLINE — limpeza compatível + PDF rápido")
     app.run_polling()
 
 if __name__ == "__main__":
