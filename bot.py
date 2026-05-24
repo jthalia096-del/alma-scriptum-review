@@ -393,43 +393,62 @@ def limpar_nome_arquivo_interno(nome):
 
 
 
-def limpar_html_texto_visivel(html):
+def limpar_texto_visivel_seguro(trecho):
     """
-    Limpa somente textos visíveis de propaganda/site.
-    Não mexe em imagens, href/src, OPF, NCX, CSS.
+    Remove somente sujeiras que aparecem como TEXTO visível.
+    Nunca deve ser usado em tags/atributos.
+    """
+    if not trecho:
+        return trecho
+
+    novo = str(trecho)
+
+    padroes = [
+        r"Ocean\s*of\s*PDF\.?\s*com",
+        r"OceanofPDF\.?\s*com",
+        r"OceanPDF\.?\s*com",
+        r"OceanofPDF",
+        r"Ocean\s*PDF",
+        r"z[\s\-_]*library(?:\.sk|\.org)?",
+        r"z[\s\-_]*lib(?:\.org)?",
+        r"1lib(?:\.sk|\.org)?",
+        r"libgen(?:\.is|\.rs)?",
+        r"anna['’]?s[\s\-_]*archive",
+        r"uploaded\s+by\s*:?\s*[^<\n\r]+",
+        r"shared\s+by\s*:?\s*[^<\n\r]+",
+        r"downloaded\s+from\s*:?\s*[^<\n\r]+",
+
+        # URLs só quando aparecem no texto visível, nunca dentro da tag.
+        r"https?://(?:www\.)?(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad|img\.wattpad|t\.me|telegram\.me|discord\.gg)[^\s<>'\"]*",
+        r"www\.(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad)[^\s<>'\"]*",
+    ]
+
+    for p in padroes:
+        novo = re.sub(p, "", novo, flags=re.I)
+
+    # remove códigos gigantes soltos no texto, comuns em links do Wattpad
+    novo = re.sub(r"\b[A-Za-z0-9]{90,}\b", "", novo)
+
+    # limpa espaços sem mexer em tags
+    novo = re.sub(r"[ \t]{2,}", " ", novo)
+
+    return novo
+
+
+def limpar_html_sem_quebrar_epub(html):
+    """
+    Limpeza segura:
+    - divide o HTML em TAGS e TEXTO;
+    - limpa APENAS o texto;
+    - mantém tags e atributos exatamente como estavam;
+    - não mexe em imagens nem links internos.
     """
     if not html:
         return html
 
-    def limpar_texto_visivel(trecho):
-        padroes = [
-            r"Ocean\s*of\s*PDF\.?\s*com",
-            r"OceanofPDF\.?\s*com",
-            r"OceanPDF\.?\s*com",
-            r"OceanofPDF",
-            r"Ocean\s*PDF",
-            r"z[\s\-_]*library(?:\.sk|\.org)?",
-            r"z[\s\-_]*lib(?:\.org)?",
-            r"1lib(?:\.sk|\.org)?",
-            r"libgen(?:\.is|\.rs)?",
-            r"anna['’]?s[\s\-_]*archive",
-            r"https?://(?:www\.)?(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad|img\.wattpad|t\.me|telegram\.me|discord\.gg)[^\s<>'\"]*",
-            r"www\.(?:oceanofpdf|z-library|z-lib|1lib|libgen|wattpad)[^\s<>'\"]*",
-            r"uploaded\s+by\s*:?\s*[^<\n\r]+",
-            r"shared\s+by\s*:?\s*[^<\n\r]+",
-            r"downloaded\s+from\s*:?\s*[^<\n\r]+",
-        ]
-
-        novo = str(trecho)
-        for p in padroes:
-            novo = re.sub(p, "", novo, flags=re.I)
-
-        novo = re.sub(r"\b[A-Za-z0-9]{90,}\b", "", novo)
-        novo = re.sub(r"[ \t]{2,}", " ", novo)
-        return novo
-
     partes = re.split(r"(<[^>]+>)", str(html))
     saida = []
+
     dentro_script = False
     dentro_style = False
 
@@ -437,23 +456,26 @@ def limpar_html_texto_visivel(html):
         if not parte:
             continue
 
+        # TAG: preserva intacta
         if parte.startswith("<") and parte.endswith(">"):
-            tl = parte.lower()
+            tag = parte.lower()
 
-            if re.match(r"<\s*script\b", tl) or re.match(r"<\s*noscript\b", tl):
+            if re.match(r"<\s*script\b", tag) or re.match(r"<\s*noscript\b", tag):
                 dentro_script = True
+                # remove abertura de script/noscript
                 continue
 
-            if re.match(r"<\s*/\s*script\s*>", tl) or re.match(r"<\s*/\s*noscript\s*>", tl):
+            if re.match(r"<\s*/\s*script\s*>", tag) or re.match(r"<\s*/\s*noscript\s*>", tag):
                 dentro_script = False
+                # remove fechamento de script/noscript
                 continue
 
-            if re.match(r"<\s*style\b", tl):
+            if re.match(r"<\s*style\b", tag):
                 dentro_style = True
                 saida.append(parte)
                 continue
 
-            if re.match(r"<\s*/\s*style\s*>", tl):
+            if re.match(r"<\s*/\s*style\s*>", tag):
                 dentro_style = False
                 saida.append(parte)
                 continue
@@ -461,115 +483,115 @@ def limpar_html_texto_visivel(html):
             saida.append(parte)
             continue
 
+        # Conteúdo dentro de script/noscript é descartado
         if dentro_script:
             continue
 
+        # CSS inline é preservado
         if dentro_style:
             saida.append(parte)
             continue
 
-        saida.append(limpar_texto_visivel(parte))
+        # Só texto visível é limpo
+        saida.append(limpar_texto_visivel_seguro(parte))
 
     return "".join(saida)
 
 
-def detectar_encoding_xml(data):
-    amostra = data[:300].decode("ascii", errors="ignore")
-    m = re.search(r'encoding=["\']([^"\']+)["\']', amostra, flags=re.I)
-    if m:
-        return m.group(1)
+def detectar_encoding_epub(data):
+    """
+    Respeita encoding declarado no XHTML quando existir.
+    """
+    try:
+        amostra = data[:400].decode("ascii", errors="ignore")
+        m = re.search(r'encoding=["\']([^"\']+)["\']', amostra, flags=re.I)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
     return "utf-8"
-
-
-def copiar_epub_com_limpeza_cirurgica(entrada, saida_temp):
-    """
-    Copia o EPUB preservando tudo.
-    Só altera HTML/XHTML/HTM com limpeza de texto visível.
-    """
-    alterados = 0
-
-    with zipfile.ZipFile(entrada, "r") as zin:
-        with zipfile.ZipFile(saida_temp, "w") as zout:
-            for item in zin.infolist():
-                data = zin.read(item.filename)
-                nome = item.filename.replace("\\", "/").lower()
-
-                if nome.endswith((".html", ".xhtml", ".htm")):
-                    try:
-                        enc = detectar_encoding_xml(data)
-                        texto = data.decode(enc, errors="ignore")
-                        novo = limpar_html_texto_visivel(texto)
-
-                        if novo != texto:
-                            alterados += 1
-                            data = novo.encode(enc, errors="xmlcharrefreplace")
-                    except Exception:
-                        pass
-
-                zout.writestr(item, data)
-
-    return alterados
-
-
-def reparar_epub_com_calibre(entrada, saida):
-    """
-    Repara/reconstrói o EPUB com o Calibre via EPUB -> EPUB.
-    Se falhar, copia o arquivo cirúrgico.
-    """
-    if not ebook_convert_disponivel():
-        shutil.copyfile(entrada, saida)
-        return saida
-
-    comando = [
-        "ebook-convert",
-        str(entrada),
-        str(saida),
-        "--chapter-mark", "none",
-        "--disable-font-rescaling",
-    ]
-
-    xvfb = shutil.which("xvfb-run")
-    if xvfb:
-        comando = [xvfb, "-a", "--server-args=-screen 0 1024x768x24"] + comando
-
-    resultado = subprocess.run(
-        comando,
-        capture_output=True,
-        text=True,
-        timeout=900,
-        env=ambiente_calibre(),
-    )
-
-    if resultado.returncode != 0 or not Path(saida).exists() or Path(saida).stat().st_size == 0:
-        shutil.copyfile(entrada, saida)
-
-    return saida
 
 
 def limpar_epub_rapido(entrada, saida):
     """
-    Limpeza com reparo final:
-    1. faz limpeza cirúrgica sem mexer em imagens/src/href/OPF;
-    2. reconstrói EPUB com Calibre EPUB -> EPUB para melhorar compatibilidade;
-    3. se Calibre falhar, entrega a cópia limpa cirúrgica.
+    LIMPEZA QUE NÃO QUEBRA O EPUB.
+
+    O EPUB original abre. Então esta função preserva a estrutura original
+    e só muda texto visível dentro de capítulos HTML/XHTML/HTM.
     """
-    temp_limpo = TEMP_DIR / f"limpo_cirurgico_{uuid.uuid4().hex}.epub"
+    alterados = 0
 
-    try:
-        alterados = copiar_epub_com_limpeza_cirurgica(entrada, temp_limpo)
-        reparar_epub_com_calibre(temp_limpo, saida)
+    with zipfile.ZipFile(entrada, "r") as zin:
+        with zipfile.ZipFile(saida, "w") as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                nome = item.filename.replace("\\", "/").lower()
 
-        if not Path(saida).exists() or Path(saida).stat().st_size == 0:
-            raise Exception("A limpeza terminou, mas o EPUB final não foi criado.")
+                # Só capítulos HTML/XHTML/HTM.
+                # NÃO mexe em OPF, NCX, XML, CSS, imagens, META-INF, encryption.xml.
+                if nome.endswith((".html", ".xhtml", ".htm")):
+                    try:
+                        enc = detectar_encoding_epub(data)
+                        texto = data.decode(enc, errors="ignore")
+                        novo = limpar_html_sem_quebrar_epub(texto)
 
-        return alterados
+                        if novo != texto:
+                            alterados += 1
+                            data = novo.encode(enc, errors="xmlcharrefreplace")
 
-    finally:
-        try:
-            Path(temp_limpo).unlink(missing_ok=True)
-        except Exception:
-            pass
+                    except Exception:
+                        # Se der qualquer problema, mantém o arquivo original intacto.
+                        pass
 
+                # Escreve usando ZipInfo original para preservar o máximo possível.
+                zout.writestr(item, data)
+
+    if not Path(saida).exists() or Path(saida).stat().st_size == 0:
+        raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
+
+    return alterados
+
+
+# Função antiga substituída abaixo
+
+def limpar_epub_rapido(entrada, saida):
+    """
+    LIMPEZA QUE NÃO QUEBRA O EPUB.
+
+    O EPUB original abre. Então esta função preserva a estrutura original
+    e só muda texto visível dentro de capítulos HTML/XHTML/HTM.
+    """
+    alterados = 0
+
+    with zipfile.ZipFile(entrada, "r") as zin:
+        with zipfile.ZipFile(saida, "w") as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                nome = item.filename.replace("\\", "/").lower()
+
+                # Só capítulos HTML/XHTML/HTM.
+                # NÃO mexe em OPF, NCX, XML, CSS, imagens, META-INF, encryption.xml.
+                if nome.endswith((".html", ".xhtml", ".htm")):
+                    try:
+                        enc = detectar_encoding_epub(data)
+                        texto = data.decode(enc, errors="ignore")
+                        novo = limpar_html_sem_quebrar_epub(texto)
+
+                        if novo != texto:
+                            alterados += 1
+                            data = novo.encode(enc, errors="xmlcharrefreplace")
+
+                    except Exception:
+                        # Se der qualquer problema, mantém o arquivo original intacto.
+                        pass
+
+                # Escreve usando ZipInfo original para preservar o máximo possível.
+                zout.writestr(item, data)
+
+    if not Path(saida).exists() or Path(saida).stat().st_size == 0:
+        raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
+
+    return alterados
 
 
 
@@ -937,7 +959,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg,
                 "🛠 Limpando EPUB",
                 45,
-                "🧹 Limpando links e preparando reparo do EPUB..."
+                "🧹 Limpando somente texto visível, sem mexer na estrutura do EPUB..."
             )
 
             alterados = await asyncio.to_thread(limpar_epub_rapido, entrada, saida)
@@ -946,7 +968,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg,
                 "🛠 Limpando EPUB",
                 85,
-                "📦 EPUB limpo e reparado. Preparando envio..."
+                "📦 EPUB limpo sem alterar estrutura. Preparando envio..."
             )
 
             tamanho_mb = Path(saida).stat().st_size / (1024 * 1024)
@@ -961,7 +983,7 @@ async def receber_arquivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(saida, "rb") as f:
                 await update.message.reply_document(
                     document=InputFile(f, filename=nome_epub(nome_original)),
-                    caption=f"✅ EPUB limpo e reparado pelo Alma Scriptum.\n🧹 Arquivos internos ajustados: {alterados}\n📚 Reparo EPUB aplicado para melhorar compatibilidade.",
+                    caption=f"✅ EPUB limpo sem quebrar estrutura.\n🧹 Arquivos internos ajustados: {alterados}\n📚 Imagens, OPF, NCX, CSS e META-INF preservados.",
                     read_timeout=600,
                     write_timeout=600,
                     connect_timeout=180,
@@ -1119,7 +1141,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — limpeza com reparo EPUB")
+    print("✅ Alma Scriptum Studio ONLINE — limpeza segura sem quebrar EPUB")
     app.run_polling()
 
 if __name__ == "__main__":
