@@ -184,6 +184,14 @@ def criar_soup_epub(html):
 
 
 def texto_de_sujeira(texto):
+    """
+    Detecta SOMENTE sujeira conhecida.
+
+    IMPORTANTE:
+    Não marque qualquer http:// como sujeira, porque EPUB/XHTML usa URLs internas
+    importantes em atributos como xmlns="http://www.w3.org/1999/xhtml".
+    Foi isso que quebrava alguns livros.
+    """
     if not texto:
         return False
 
@@ -193,168 +201,147 @@ def texto_de_sujeira(texto):
     padroes = [
         "oceanofpdf", "oceanpdf", "oceanofbooks",
         "z-library", "zlibrary", "z-lib", "1lib", "libgen",
+        "annas-archive", "anna'sarchive", "anna’sarchive",
         "wattpad.com", "img.wattpad.com",
-        "annas-archive", "anna's archive", "vk.com",
         "t.me/", "telegram.me/", "discord.gg",
-        "uploaded by", "shared by", "downloaded from",
-        "free ebook", "ebook hunter", "bookfrom.net",
+        "uploadedby", "sharedby", "downloadedfrom",
+        "freeebook", "ebookhunter", "bookfrom.net",
     ]
 
     if any(p in compact for p in padroes):
         return True
 
-    if re.search(r"https?://", t, flags=re.I):
-        return True
-
-    if re.search(r"www\.", t, flags=re.I):
-        return True
-
+    # E-mail solto de divulgação/pirataria.
     if re.search(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", t, flags=re.I):
         return True
 
-    if re.search(r"[a-z0-9]{45,}", compact, flags=re.I):
+    # Códigos gigantes aleatórios usados como marca d'água.
+    if re.search(r"\b[a-z0-9]{60,}\b", compact, flags=re.I):
         return True
 
     return False
 
 
 def limpar_texto_pesado(texto):
+    """
+    Limpa SOMENTE marcas conhecidas em texto visível.
+    Não apaga URLs genéricas, para não destruir namespace XML do EPUB.
+    """
     if not texto:
         return texto
 
     texto = str(texto)
 
     padroes = [
-        r"Ocean\s*of\s*PDF\.?\s*com",
-        r"OceanofPDF\.?\s*com",
-        r"OceanPDF\.?\s*com",
+        r"Ocean\s*of\s*PDF\s*\.?\s*com",
+        r"OceanofPDF\s*\.?\s*com",
+        r"OceanPDF\s*\.?\s*com",
         r"OceanofPDF",
         r"Ocean\s*PDF",
-        r"z[\s\-_]*library(?:\.sk|\.org)?",
-        r"z[\s\-_]*lib(?:\.org)?",
-        r"1lib(?:\.sk|\.org)?",
-        r"libgen(?:\.is|\.rs)?",
-        r"anna['’]?s[\s\-_]*archive",
-        r"wattpad\.com/\S+",
-        r"img\.wattpad\.com/\S+",
-        r"https?://\S+",
-        r"www\.\S+",
-        r"t\.me/\S+",
-        r"telegram\.me/\S+",
-        r"discord\.gg/\S+",
-        r"uploaded\s+by\s*:?\s*\S+",
-        r"shared\s+by\s*:?\s*\S+",
-        r"downloaded\s+from\s*:?\s*\S+",
+        r"z\s*[\-_]?\s*library(?:\.(?:sk|org|to|net))?",
+        r"z\s*[\-_]?\s*lib(?:\.(?:org|to|net))?",
+        r"1lib(?:\.(?:sk|org|to|net))?",
+        r"libgen(?:\.(?:is|rs|li))?",
+        r"anna['’]?s\s*[\-_]?\s*archive",
+        r"(?:https?://)?(?:www\.)?wattpad\.com/\S+",
+        r"(?:https?://)?img\.wattpad\.com/\S+",
+        r"(?:https?://)?(?:www\.)?oceanofpdf\.com\S*",
+        r"(?:https?://)?(?:www\.)?z-library\.[^\s<]+",
+        r"(?:https?://)?(?:www\.)?1lib\.[^\s<]+",
+        r"(?:https?://)?t\.me/\S+",
+        r"(?:https?://)?telegram\.me/\S+",
+        r"(?:https?://)?discord\.gg/\S+",
+        r"uploaded\s+by\s*:?.{0,80}",
+        r"shared\s+by\s*:?.{0,80}",
+        r"downloaded\s+from\s*:?.{0,80}",
+        r"free\s+ebook\s+download.{0,80}",
     ]
 
     for p in padroes:
         texto = re.sub(p, "", texto, flags=re.I)
 
     texto = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "", texto)
-    texto = re.sub(r"\b[A-Za-z0-9]{45,}\b", "", texto)
+    texto = re.sub(r"\b[A-Za-z0-9]{60,}\b", "", texto)
     texto = re.sub(r"\s+([,.!?;:])", r"\1", texto)
-    texto = re.sub(r"\s{2,}", " ", texto)
+    texto = re.sub(r"[ \t]{2,}", " ", texto)
+    texto = re.sub(r"\n{3,}", "\n\n", texto)
 
     return texto.strip()
 
 
+def _tag_tem_conteudo_util(tag):
+    if tag.find(["img", "image", "svg", "audio", "video", "object"]):
+        return True
+    return bool(tag.get_text(" ", strip=True))
+
+
 def limpar_html_pesado(html):
     """
-    Limpeza pesada, mas segura:
-    - remove OceanofPDF, z-library, Wattpad links e URLs gigantes;
-    - NÃO remove imagens/personagens/capas internas;
-    - não apaga bloco inteiro se ele tiver imagem;
-    - preserva melhor a estrutura do EPUB.
+    Limpeza segura do capítulo XHTML/HTML.
+
+    O segredo aqui é: limpar só TEXTO VISÍVEL e links suspeitos.
+    Nunca limpar XML/OPF/NCX/CSS e nunca sair apagando qualquer URL,
+    porque atributos como xmlns="http://www.w3.org/1999/xhtml" são obrigatórios.
     """
     soup = criar_soup_epub(html)
 
+    # Remove scripts comuns. Não mexe em style para não quebrar CSS interno.
     for tag in soup.find_all(["script", "noscript"]):
         tag.decompose()
 
-    # Limpa links <a>. Se tiver imagem dentro, preserva a imagem e remove só o link em volta.
+    # Links suspeitos: remove só o link ou o bloco quando for claramente propaganda.
     for tag in list(soup.find_all("a")):
         texto = tag.get_text(" ", strip=True)
-        attrs = " ".join(str(v) for v in tag.attrs.values())
+        href = tag.get("href", "") or ""
 
-        if texto_de_sujeira(attrs) or texto_de_sujeira(texto):
+        if texto_de_sujeira(href) or texto_de_sujeira(texto):
             if tag.find(["img", "image"]):
+                # Se tem imagem dentro, mantém a imagem e tira só o clique/link.
                 tag.unwrap()
             else:
-                tag.decompose()
+                limpo = limpar_texto_pesado(texto)
+                if limpo and not texto_de_sujeira(limpo):
+                    tag.replace_with(NavigableString(limpo))
+                else:
+                    tag.decompose()
 
-    # Limpa tags de texto sem apagar imagem.
-    for tag in list(soup.find_all(["p", "div", "span", "font", "center", "small", "em", "i", "b", "strong"])):
-        texto = tag.get_text(" ", strip=True)
-        attrs = " ".join(str(v) for v in tag.attrs.values())
-        tem_imagem = tag.find(["img", "image"]) is not None
-
-        if texto_de_sujeira(attrs):
-            if tem_imagem:
-                for attr in list(tag.attrs.keys()):
-                    val = str(tag.attrs.get(attr, ""))
-                    if texto_de_sujeira(val):
-                        del tag.attrs[attr]
-            else:
-                tag.decompose()
+    # Remove blocos inteiros somente quando o TEXTO VISÍVEL for sujeira.
+    # Não avalia atributos, para não destruir xmlns, href interno, classes etc.
+    for tag in list(soup.find_all(["p", "div", "span", "font", "center", "small", "em", "i", "b", "strong", "li"])):
+        if tag.find(["img", "image", "svg"]):
             continue
 
+        texto = tag.get_text(" ", strip=True)
         if texto_de_sujeira(texto):
             texto_limpo = limpar_texto_pesado(texto)
-
-            if tem_imagem:
-                pass
-            elif not texto_limpo or len(texto_limpo.strip()) <= 2:
+            if texto_limpo and len(texto_limpo) > 2 and not texto_de_sujeira(texto_limpo):
+                tag.clear()
+                tag.append(NavigableString(texto_limpo))
+            else:
                 tag.decompose()
-                continue
 
-    # NÃO remove img/image por src do Wattpad. Remove só source suspeito.
-    for tag in list(soup.find_all(["source"])):
-        attrs = " ".join(str(v) for v in tag.attrs.values())
-        if texto_de_sujeira(attrs):
-            tag.decompose()
-
-    # Limpa textos soltos.
+    # Limpa textos soltos, mas nunca dentro de style/script.
     for node in list(soup.find_all(string=True)):
         parent = getattr(node, "parent", None)
-        parent_name = getattr(parent, "name", "") if parent else ""
+        parent_name = (getattr(parent, "name", "") or "").lower() if parent else ""
 
-        if parent_name in ["script", "noscript"]:
+        if parent_name in ["script", "noscript", "style"]:
             continue
 
         original = str(node)
-
-        if parent_name in ["style"]:
-            novo_css = limpar_texto_pesado(original)
-            node.replace_with(NavigableString(novo_css))
-            continue
-
         if texto_de_sujeira(original):
             novo = limpar_texto_pesado(original)
-
-            if novo.strip():
+            if novo and not texto_de_sujeira(novo):
                 node.replace_with(NavigableString(novo))
             else:
                 node.extract()
 
-            continue
-
-        novo = limpar_texto_pesado(original)
-
-        if novo != original:
-            if novo.strip():
-                node.replace_with(NavigableString(novo))
-            else:
-                node.extract()
-
-    # Remove tags vazias, mas nunca se tiver imagem.
-    for tag in list(soup.find_all(["p", "div", "span", "center", "font", "small"])):
-        if tag.find(["img", "image"]):
-            continue
-        if not tag.get_text(" ", strip=True):
+    # Remove tags vazias simples, preservando estrutura e mídia.
+    for tag in list(soup.find_all(["p", "div", "span", "center", "font", "small", "li"])):
+        if not _tag_tem_conteudo_util(tag):
             tag.decompose()
 
     return str(soup)
-
 
 
 def escrever_epub_valido(saida, arquivos):
@@ -367,14 +354,9 @@ def escrever_epub_valido(saida, arquivos):
     saida = Path(saida)
 
     with zipfile.ZipFile(saida, "w") as zout:
-        if "mimetype" in arquivos:
-            info = zipfile.ZipInfo("mimetype")
-            info.compress_type = zipfile.ZIP_STORED
-            zout.writestr(info, arquivos["mimetype"])
-        else:
-            info = zipfile.ZipInfo("mimetype")
-            info.compress_type = zipfile.ZIP_STORED
-            zout.writestr(info, b"application/epub+zip")
+        info = zipfile.ZipInfo("mimetype")
+        info.compress_type = zipfile.ZIP_STORED
+        zout.writestr(info, arquivos.get("mimetype", b"application/epub+zip"))
 
         for nome, data in arquivos.items():
             nome_norm = str(nome).replace("\\", "/")
@@ -396,12 +378,16 @@ def limpar_epub_rapido(entrada, saida):
     """
     Limpeza segura do EPUB.
 
-    IMPORTANTE:
-    Não mexe em .opf, .ncx, .xml, .css, imagens, META-INF ou mimetype.
-    Esses arquivos carregam a estrutura do EPUB. Se limpar URLs neles,
-    alguns leitores param de abrir o livro.
+    NÃO mexe em:
+    - .opf
+    - .ncx
+    - .xml
+    - .css
+    - imagens
+    - META-INF
+    - mimetype
 
-    Só limpa arquivos de capítulo: .html, .xhtml e .htm.
+    Só limpa capítulos: .html, .xhtml e .htm.
     """
     alterados = 0
     arquivos = {}
@@ -411,15 +397,12 @@ def limpar_epub_rapido(entrada, saida):
             nome_original = item.filename
             nome = limpar_nome_arquivo_interno(nome_original)
             nome_lower = nome.lower()
-
             data = zin.read(nome_original)
 
-            # NÃO remover encryption.xml.
-            # NÃO mexer em OPF/NCX/XML/CSS/imagens.
-            # Só HTML/XHTML/HTM.
             if nome_lower.endswith((".html", ".xhtml", ".htm")):
                 try:
-                    texto = data.decode("utf-8", errors="ignore")
+                    # Mantém o máximo possível do arquivo original.
+                    texto = data.decode("utf-8", errors="replace")
                     novo = limpar_html_pesado(texto)
 
                     if novo != texto:
@@ -427,6 +410,7 @@ def limpar_epub_rapido(entrada, saida):
                         data = novo.encode("utf-8", errors="xmlcharrefreplace")
 
                 except Exception:
+                    # Se um capítulo der erro, mantém original em vez de quebrar o livro.
                     pass
 
             arquivos[nome] = data
@@ -436,10 +420,13 @@ def limpar_epub_rapido(entrada, saida):
     if not Path(saida).exists() or Path(saida).stat().st_size == 0:
         raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
 
+    # Teste simples: garante que o EPUB final abre como ZIP e tem arquivos obrigatórios.
+    with zipfile.ZipFile(saida, "r") as teste:
+        nomes = set(teste.namelist())
+        if "mimetype" not in nomes or "META-INF/container.xml" not in nomes:
+            raise Exception("O EPUB limpo ficou sem estrutura obrigatória. Mantive a limpeza bloqueada para não enviar arquivo quebrado.")
+
     return alterados
-
-
-
 
 
 
