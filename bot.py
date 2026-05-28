@@ -245,10 +245,151 @@ def texto_de_sujeira(texto):
     return False
 
 
+
+def texto_lixo_html_quebrado(texto):
+    """
+    Detecta DOCTYPE/DTD/XML que vazou para dentro da página do livro.
+    Exemplo do erro do print:
+    html PUBLIC "-//W3C//DTD XHTML 1.1//EN"
+    """
+    if not texto:
+        return False
+
+    t = unescape(str(texto)).strip()
+    if not t:
+        return False
+
+    compact = re.sub(r"\s+", " ", t).strip().lower()
+
+    padroes = [
+        r"\bhtml\s+public\b",
+        r"\bxhtml\s+1\.1\b",
+        r"\bxhtml\s+1\.0\b",
+        r"\b/w3c//dtd\b",
+        r"\bdtd\s+xhtml\b",
+        r"^-//w3c//dtd",
+        r"^public\s+['\"]?-//w3c",
+        r"^<!doctype\b",
+        r"^<\?xml\b",
+    ]
+
+    return any(re.search(p, compact, flags=re.I) for p in padroes)
+
+
+def limpar_lixo_html_quebrado_texto(texto):
+    """
+    Remove linhas/frases de cabeçalho HTML quebrado que aparecem como texto visível.
+    Mantém o restante do parágrafo se tiver conteúdo real junto.
+    """
+    if not texto:
+        return texto
+
+    texto = unescape(str(texto))
+
+    padroes = [
+        r"(?im)^\s*html\s+PUBLIC\s+['\"]?-//W3C//DTD\s+XHTML\s+[^'\"]*['\"]?\s*$",
+        r"(?im)^\s*PUBLIC\s+['\"]?-//W3C//DTD\s+XHTML\s+[^'\"]*['\"]?\s*$",
+        r"(?im)^\s*XHTML\s+1\.[01]//EN['\"]?\s*$",
+        r"(?im)^\s*['\"]?-//W3C//DTD\s+XHTML\s+[^'\"]*['\"]?\s*$",
+        r"(?im)^\s*<!DOCTYPE[^>]*>\s*$",
+        r"(?im)^\s*<\?xml[^>]*\?>\s*$",
+    ]
+
+    for p in padroes:
+        texto = re.sub(p, "", texto, flags=re.I)
+
+    # Remove pedaços quebrados que às vezes vêm na mesma linha, igual no print.
+    texto = re.sub(r"\bhtml\s+PUBLIC\s+['\"]?-//W3C//DTD\s+XHTML\s+1\.[01]//EN['\"]?", "", texto, flags=re.I)
+    texto = re.sub(r"['\"]?-//W3C//DTD\s+XHTML\s+1\.[01]//EN['\"]?", "", texto, flags=re.I)
+    texto = re.sub(r"\bXHTML\s+1\.[01]//EN['\"]?", "", texto, flags=re.I)
+
+    texto = re.sub(r"\s{2,}", " ", texto)
+    return texto.strip()
+
+
+def pagina_parece_so_imagem(soup):
+    """
+    Detecta páginas de capa/imagem para evitar que alguns apps deem zoom/corte.
+    """
+    body = soup.body if soup.body else soup
+    imagens = body.find_all(["img", "image"])
+    texto = body.get_text(" ", strip=True)
+
+    texto_limpo = limpar_lixo_html_quebrado_texto(texto)
+    texto_limpo = limpar_texto_pesado(texto_limpo) if texto_limpo else ""
+
+    return len(imagens) >= 1 and len(texto_limpo.strip()) <= 40
+
+
+def aplicar_css_imagens_epub(soup):
+    """
+    Deixa imagens/capas mais compatíveis entre apps:
+    - usa contain, para mostrar a imagem inteira;
+    - evita que o leitor interprete como cover/corte com zoom;
+    - aplica só CSS seguro.
+    """
+    css = """
+.alma-img-contain, img {
+    max-width: 100% !important;
+    height: auto !important;
+    object-fit: contain !important;
+}
+.alma-cover-page {
+    margin: 0 !important;
+    padding: 0 !important;
+    text-align: center !important;
+}
+.alma-cover-page img {
+    display: block !important;
+    margin: 0 auto !important;
+    max-width: 100% !important;
+    max-height: 98vh !important;
+    width: auto !important;
+    height: auto !important;
+    object-fit: contain !important;
+}
+"""
+
+    if soup.head:
+        style = soup.new_tag("style")
+        style.string = css
+        soup.head.append(style)
+
+    if pagina_parece_so_imagem(soup):
+        if soup.body:
+            classes = soup.body.get("class", [])
+            if isinstance(classes, str):
+                classes = [classes]
+            if "alma-cover-page" not in classes:
+                classes.append("alma-cover-page")
+            soup.body["class"] = classes
+
+    for img in soup.find_all("img"):
+        classes = img.get("class", [])
+        if isinstance(classes, str):
+            classes = [classes]
+        if "alma-img-contain" not in classes:
+            classes.append("alma-img-contain")
+        img["class"] = classes
+
+        estilo = img.get("style", "")
+        # Remove regras que costumam causar corte/zoom.
+        estilo = re.sub(r"(?i)object-fit\s*:\s*cover\s*;?", "", estilo)
+        estilo = re.sub(r"(?i)height\s*:\s*100%\s*;?", "", estilo)
+        estilo = re.sub(r"(?i)width\s*:\s*100%\s*;?", "", estilo)
+
+        extras = "max-width:100% !important; height:auto !important; object-fit:contain !important;"
+        img["style"] = (estilo.strip() + "; " + extras).strip("; ")
+
+    return soup
+
+
+
 def limpar_texto_pesado(texto):
     if not texto:
         return texto
 
+    texto = limpar_lixo_html_quebrado_texto(texto)
     texto = str(texto)
 
     padroes = [
@@ -297,6 +438,12 @@ def limpar_html_pesado(html):
 
     for tag in soup.find_all(["script", "noscript"]):
         tag.decompose()
+
+    # Remove DOCTYPE/DTD/XML que vazou como texto visível dentro da página.
+    for tag in list(soup.find_all(["p", "div", "span", "font", "center", "small", "em", "i", "b", "strong"])):
+        texto = tag.get_text(" ", strip=True)
+        if texto_lixo_html_quebrado(texto) and len(limpar_lixo_html_quebrado_texto(texto)) <= 5 and not tag.find(["img", "image"]):
+            tag.decompose()
 
     # Limpa links <a>. Se tiver imagem dentro, preserva a imagem e remove só o link em volta.
     for tag in list(soup.find_all("a")):
@@ -350,6 +497,14 @@ def limpar_html_pesado(html):
 
         original = str(node)
 
+        if texto_lixo_html_quebrado(original):
+            novo = limpar_lixo_html_quebrado_texto(original)
+            if novo.strip():
+                node.replace_with(NavigableString(novo))
+            else:
+                node.extract()
+            continue
+
         if parent_name in ["style"]:
             novo_css = limpar_texto_pesado(original)
             node.replace_with(NavigableString(novo_css))
@@ -379,6 +534,8 @@ def limpar_html_pesado(html):
             continue
         if not tag.get_text(" ", strip=True):
             tag.decompose()
+
+    soup = aplicar_css_imagens_epub(soup)
 
     return str(soup)
 
