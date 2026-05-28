@@ -246,6 +246,69 @@ def texto_de_sujeira(texto):
 
 
 
+
+def limpar_cabecalho_xhtml_malformado(html):
+    """
+    Corrige o erro que apareceu no seu print:
+    alguns EPUBs vêm com o DTD/DOCTYPE quebrado assim:
+    <?xml ...?>"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd"<html...
+    ou como texto visível:
+    html PUBLIC "-//W3C//DTD XHTML 1.1//EN"
+
+    Essa função remove esses pedaços ANTES do BeautifulSoup ler a página.
+    """
+    if not html:
+        return html
+
+    texto = unescape(str(html))
+
+    # Remove URL do DTD que fica solta entre o XML e a tag <html>.
+    texto = re.sub(
+        r'(<\?xml[^>]*\?>)\s*["\']?https?://www\.w3\.org/TR/xhtml[^"\'<>\s]*["\']?\s*',
+        r'\1\n',
+        texto,
+        flags=re.I,
+    )
+
+    # Remove qualquer URL DTD solta que tenha virado texto visível.
+    texto = re.sub(
+        r'["\']?https?://www\.w3\.org/TR/xhtml[^"\'<>\s]*["\']?',
+        '',
+        texto,
+        flags=re.I,
+    )
+
+    # Remove fragmentos de PUBLIC/DTD quebrados, inclusive quando vêm sem <!DOCTYPE>.
+    texto = re.sub(
+        r'(?is)["\']?\s*html\s+PUBLIC\s+["\']?-//W3C//DTD\s+XHTML\s+1\.[01]//EN["\']?\s*',
+        '',
+        texto,
+    )
+    texto = re.sub(
+        r'(?is)["\']?\s*PUBLIC\s+["\']?-//W3C//DTD\s+XHTML\s+1\.[01]//EN["\']?\s*',
+        '',
+        texto,
+    )
+    texto = re.sub(
+        r'(?is)["\']?\s*-//W3C//DTD\s+XHTML\s+1\.[01]//EN["\']?\s*',
+        '',
+        texto,
+    )
+    texto = re.sub(
+        r'(?is)["\']?\s*XHTML\s+1\.[01]//EN["\']?\s*',
+        '',
+        texto,
+    )
+
+    # Remove DOCTYPE quebrado completo, se existir.
+    texto = re.sub(r'(?is)<!DOCTYPE[^>]*>', '', texto)
+
+    # Caso comum: sobra aspas entre ?> e <html>.
+    texto = re.sub(r'(\?>)\s*["\']+\s*(<html\b)', r'\1\n\2', texto, flags=re.I)
+
+    return texto
+
+
 def texto_lixo_html_quebrado(texto):
     """
     Detecta DOCTYPE/DTD/XML que vazou para dentro da página do livro.
@@ -266,6 +329,8 @@ def texto_lixo_html_quebrado(texto):
         r"\bxhtml\s+1\.1\b",
         r"\bxhtml\s+1\.0\b",
         r"\b/w3c//dtd\b",
+        r"www\.w3\.org/tr/xhtml",
+        r"xhtml11/DTD/xhtml11\.dtd",
         r"\bdtd\s+xhtml\b",
         r"^-//w3c//dtd",
         r"^public\s+['\"]?-//w3c",
@@ -299,9 +364,11 @@ def limpar_lixo_html_quebrado_texto(texto):
         texto = re.sub(p, "", texto, flags=re.I)
 
     # Remove pedaços quebrados que às vezes vêm na mesma linha, igual no print.
+    texto = limpar_cabecalho_xhtml_malformado(texto)
     texto = re.sub(r"\bhtml\s+PUBLIC\s+['\"]?-//W3C//DTD\s+XHTML\s+1\.[01]//EN['\"]?", "", texto, flags=re.I)
     texto = re.sub(r"['\"]?-//W3C//DTD\s+XHTML\s+1\.[01]//EN['\"]?", "", texto, flags=re.I)
     texto = re.sub(r"\bXHTML\s+1\.[01]//EN['\"]?", "", texto, flags=re.I)
+    texto = re.sub(r"['\"]?https?://www\.w3\.org/TR/xhtml[^'\"<>\s]*['\"]?", "", texto, flags=re.I)
 
     texto = re.sub(r"\s{2,}", " ", texto)
     return texto.strip()
@@ -334,7 +401,14 @@ def aplicar_css_imagens_epub(soup):
     height: auto !important;
     object-fit: contain !important;
 }
-.alma-cover-page {
+html, body.alma-cover-page {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    min-height: 100% !important;
+    text-align: center !important;
+}
+.alma-cover-page div, .alma-cover-page p {
     margin: 0 !important;
     padding: 0 !important;
     text-align: center !important;
@@ -343,7 +417,7 @@ def aplicar_css_imagens_epub(soup):
     display: block !important;
     margin: 0 auto !important;
     max-width: 100% !important;
-    max-height: 98vh !important;
+    max-height: 100% !important;
     width: auto !important;
     height: auto !important;
     object-fit: contain !important;
@@ -372,13 +446,19 @@ def aplicar_css_imagens_epub(soup):
             classes.append("alma-img-contain")
         img["class"] = classes
 
+        # Remove atributos fixos que fazem alguns leitores Android cortar/zoomar imagem.
+        for attr in ["width", "height"]:
+            if attr in img.attrs:
+                del img.attrs[attr]
+
         estilo = img.get("style", "")
         # Remove regras que costumam causar corte/zoom.
         estilo = re.sub(r"(?i)object-fit\s*:\s*cover\s*;?", "", estilo)
         estilo = re.sub(r"(?i)height\s*:\s*100%\s*;?", "", estilo)
         estilo = re.sub(r"(?i)width\s*:\s*100%\s*;?", "", estilo)
+        estilo = re.sub(r"(?i)position\s*:\s*absolute\s*;?", "", estilo)
 
-        extras = "max-width:100% !important; height:auto !important; object-fit:contain !important;"
+        extras = "max-width:100% !important; max-height:100% !important; width:auto !important; height:auto !important; object-fit:contain !important;"
         img["style"] = (estilo.strip() + "; " + extras).strip("; ")
 
     return soup
@@ -434,6 +514,7 @@ def limpar_html_pesado(html):
     - não apaga bloco inteiro se ele tiver imagem;
     - preserva melhor a estrutura do EPUB.
     """
+    html = limpar_cabecalho_xhtml_malformado(html)
     soup = criar_soup_epub(html)
 
     for tag in soup.find_all(["script", "noscript"]):
@@ -537,7 +618,9 @@ def limpar_html_pesado(html):
 
     soup = aplicar_css_imagens_epub(soup)
 
-    return str(soup)
+    resultado = str(soup)
+    resultado = limpar_cabecalho_xhtml_malformado(resultado)
+    return resultado
 
 
 
