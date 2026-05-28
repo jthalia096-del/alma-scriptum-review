@@ -725,7 +725,13 @@ def limpar_epub_rapido(entrada, saida):
 
 def extrair_htmls_epub_ordenado(caminho_epub):
     """
-    Extrai HTML/XHTML do EPUB para conversão rápida em PDF.
+    Extrai HTML/XHTML do EPUB respeitando a ordem REAL do livro.
+
+    IMPORTANTE:
+    Antes o código fazia sorted() por nome de arquivo. Isso quebra EPUB do Wattpad,
+    Vellum e vários outros, porque a ordem correta fica no OPF/spine.
+    Resultado do erro antigo: capa/imagem indo para o final, capítulos fora de ordem
+    e Kindle não mostrando imagens corretamente.
     """
     caminho_epub = Path(caminho_epub)
     pasta = TEMP_DIR / f"epub_pdf_{uuid.uuid4().hex}"
@@ -735,16 +741,81 @@ def extrair_htmls_epub_ordenado(caminho_epub):
         zin.extractall(pasta)
 
     htmls = []
-    for p in pasta.rglob("*"):
-        if p.suffix.lower() in [".xhtml", ".html", ".htm"]:
-            nome = p.name.lower()
-            if nome in ["nav.xhtml", "toc.xhtml"]:
+    usados = set()
+
+    # 1) Tenta usar o spine do EPUB, que é a ordem verdadeira de leitura.
+    try:
+        book = epub.read_epub(str(caminho_epub))
+
+        for item_id, _linear in book.spine:
+            item = book.get_item_with_id(item_id)
+            if not item:
                 continue
-            htmls.append(p)
 
-    htmls = sorted(htmls, key=lambda x: str(x).lower())
+            nome = item.get_name().replace("\\", "/")
+            nome_lower = nome.lower()
+
+            if nome_lower.endswith((".xhtml", ".html", ".htm")):
+                arquivo = pasta / nome
+                if arquivo.exists() and arquivo not in usados:
+                    htmls.append(arquivo)
+                    usados.add(arquivo)
+    except Exception:
+        pass
+
+    # 2) Se o spine vier quebrado, tenta achar pelo OPF manualmente.
+    if not htmls:
+        try:
+            opfs = list(pasta.rglob("*.opf"))
+            if opfs:
+                opf = opfs[0]
+                base = opf.parent
+                soup = BeautifulSoup(opf.read_text(encoding="utf-8", errors="ignore"), "xml")
+
+                manifest = {}
+                for item in soup.find_all("item"):
+                    item_id = item.get("id")
+                    href = item.get("href")
+                    media = item.get("media-type", "")
+                    if item_id and href and ("html" in media or href.lower().endswith((".xhtml", ".html", ".htm"))):
+                        manifest[item_id] = href.replace("\\", "/")
+
+                for itemref in soup.find_all("itemref"):
+                    item_id = itemref.get("idref")
+                    href = manifest.get(item_id)
+                    if href:
+                        arquivo = (base / href).resolve()
+                        try:
+                            arquivo.relative_to(pasta.resolve())
+                        except Exception:
+                            continue
+                        if arquivo.exists() and arquivo not in usados:
+                            htmls.append(arquivo)
+                            usados.add(arquivo)
+        except Exception:
+            pass
+
+    # 3) Último recurso: ordem física do ZIP, sem sorted alfabético.
+    # Isso é melhor que ordenar por nome, porque muitos EPUBs guardam os capítulos
+    # no ZIP na ordem próxima da leitura.
+    if not htmls:
+        try:
+            with zipfile.ZipFile(caminho_epub, "r") as zin:
+                for item in zin.infolist():
+                    nome = item.filename.replace("\\", "/")
+                    nome_lower = nome.lower()
+                    if nome_lower.endswith((".xhtml", ".html", ".htm")):
+                        base_nome = Path(nome).name.lower()
+                        if base_nome in ["nav.xhtml", "toc.xhtml"]:
+                            continue
+                        arquivo = pasta / nome
+                        if arquivo.exists() and arquivo not in usados:
+                            htmls.append(arquivo)
+                            usados.add(arquivo)
+        except Exception:
+            pass
+
     return pasta, htmls
-
 
 def preparar_html_para_pdf(conteudo, arquivo_base):
     soup = BeautifulSoup(conteudo, "html.parser")
@@ -840,18 +911,11 @@ p { margin: 0 0 .75em 0; }
 
 def pode_usar_pdf_rapido(entrada, formato_saida):
     """
-    DESATIVADO de propósito.
-
-    O modo rápido com WeasyPrint estava quebrando EPUB -> PDF para Kindle:
-    - colocava imagens/capas fora de ordem;
-    - às vezes mandava imagem para o final;
-    - não respeitava a capa real do EPUB;
-    - gerava PDF A5 com páginas demais e sumia imagens em alguns apps.
-
-    Agora EPUB -> PDF também passa pelo Calibre, igual ao arquivo que abriu certo.
+    Mantém o modo rápido para EPUB -> PDF para não travar no Railway.
+    A correção agora está na ordem do spine, então o PDF rápido não joga
+    capa/imagem para o final como acontecia antes.
     """
-    return False
-
+    return Path(entrada).suffix.lower() == ".epub" and str(formato_saida).lower() == "pdf"
 
 def ebook_convert_disponivel():
     return shutil.which("ebook-convert") is not None
@@ -1010,7 +1074,9 @@ def remover_varias_imagens_epub(entrada, saida, nomes_imagens):
             item.set_content(str(soup).encode("utf-8"))
         except Exception:
             pass
-    book.items = [item for item in book.items if getattr(item, "file_name", "") not in nomes_imagens and getattr(item, "file_name", "").replace("\\", "/").split("/")[-1] not in nomes_limpos]
+    # Não removo mais o arquivo da imagem do manifest.
+    # Kindle quebra quando o manifest perde imagens/capa.
+    # O botão remove só a chamada da imagem nas páginas HTML.
     epub.write_epub(str(saida), book)
 
 
@@ -1400,7 +1466,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.IMAGE, receber_documento_imagem))
     app.add_handler(MessageHandler(filters.Document.ALL, receber_arquivo))
 
-    print("✅ Alma Scriptum Studio ONLINE — limpeza compatível + PDF/Kindle pelo Calibre")
+    print("✅ Alma Scriptum Studio ONLINE — limpeza compatível + PDF rápido com ordem corrigida")
     app.run_polling()
 
 if __name__ == "__main__":
