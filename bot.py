@@ -390,32 +390,26 @@ def pagina_parece_so_imagem(soup):
 
 def aplicar_css_imagens_epub(soup):
     """
-    Deixa imagens/capas mais compatíveis entre apps:
-    - usa contain, para mostrar a imagem inteira;
-    - evita que o leitor interprete como cover/corte com zoom;
-    - aplica só CSS seguro.
+    Ajuste visual leve para imagens.
+    IMPORTANTE:
+    Kindle é sensível. Por isso esta função NÃO remove src, NÃO remove imagens,
+    NÃO troca caminho e NÃO tenta reconstruir manifest/OPF.
     """
     css = """
-.alma-img-contain, img {
+img.alma-img-contain {
     max-width: 100% !important;
     height: auto !important;
     object-fit: contain !important;
-}
-html, body.alma-cover-page {
-    margin: 0 !important;
-    padding: 0 !important;
-    width: 100% !important;
-    min-height: 100% !important;
-    text-align: center !important;
-}
-.alma-cover-page div, .alma-cover-page p {
-    margin: 0 !important;
-    padding: 0 !important;
-    text-align: center !important;
-}
-.alma-cover-page img {
     display: block !important;
-    margin: 0 auto !important;
+    margin-left: auto !important;
+    margin-right: auto !important;
+}
+body.alma-cover-page {
+    margin: 0 !important;
+    padding: 0 !important;
+    text-align: center !important;
+}
+body.alma-cover-page img {
     max-width: 100% !important;
     max-height: 100% !important;
     width: auto !important;
@@ -429,14 +423,13 @@ html, body.alma-cover-page {
         style.string = css
         soup.head.append(style)
 
-    if pagina_parece_so_imagem(soup):
-        if soup.body:
-            classes = soup.body.get("class", [])
-            if isinstance(classes, str):
-                classes = [classes]
-            if "alma-cover-page" not in classes:
-                classes.append("alma-cover-page")
-            soup.body["class"] = classes
+    if pagina_parece_so_imagem(soup) and soup.body:
+        classes = soup.body.get("class", [])
+        if isinstance(classes, str):
+            classes = [classes]
+        if "alma-cover-page" not in classes:
+            classes.append("alma-cover-page")
+        soup.body["class"] = classes
 
     for img in soup.find_all("img"):
         classes = img.get("class", [])
@@ -446,24 +439,13 @@ html, body.alma-cover-page {
             classes.append("alma-img-contain")
         img["class"] = classes
 
-        # Remove atributos fixos que fazem alguns leitores Android cortar/zoomar imagem.
-        for attr in ["width", "height"]:
-            if attr in img.attrs:
-                del img.attrs[attr]
-
-        estilo = img.get("style", "")
-        # Remove regras que costumam causar corte/zoom.
+        # NÃO apagar src, alt, width, height nem caminhos.
+        estilo = img.get("style", "") or ""
         estilo = re.sub(r"(?i)object-fit\s*:\s*cover\s*;?", "", estilo)
-        estilo = re.sub(r"(?i)height\s*:\s*100%\s*;?", "", estilo)
-        estilo = re.sub(r"(?i)width\s*:\s*100%\s*;?", "", estilo)
         estilo = re.sub(r"(?i)position\s*:\s*absolute\s*;?", "", estilo)
-
-        extras = "max-width:100% !important; max-height:100% !important; width:auto !important; height:auto !important; object-fit:contain !important;"
-        img["style"] = (estilo.strip() + "; " + extras).strip("; ")
+        img["style"] = estilo.strip()
 
     return soup
-
-
 
 def limpar_texto_pesado(texto):
     if not texto:
@@ -659,12 +641,118 @@ def limpar_nome_arquivo_interno(nome):
     return str(nome).replace("\\", "/")
 
 
+
+def html_parece_pagina_de_imagem_raw(html):
+    """
+    Detecta páginas de capa/imagem ANTES do BeautifulSoup.
+    Essas páginas não devem ser reconstruídas agressivamente,
+    porque o Kindle pode perder a referência da imagem.
+    """
+    if not html:
+        return False
+
+    bruto = str(html)
+    tem_img = re.search(r"<\s*(img|image)\b", bruto, flags=re.I) is not None
+    if not tem_img:
+        return False
+
+    sem_tags = re.sub(r"<[^>]+>", " ", bruto)
+    sem_tags = limpar_lixo_html_quebrado_texto(sem_tags)
+    sem_tags = limpar_texto_pesado(sem_tags) if sem_tags else ""
+    return len(sem_tags.strip()) <= 80
+
+
+def limpar_html_imagem_sem_reescrever(html):
+    """
+    Limpeza segura para capa/páginas com imagens:
+    - remove DOCTYPE/XHTML quebrado que aparece como sujeira;
+    - injeta CSS leve anti-zoom;
+    - NÃO usa BeautifulSoup para reescrever a página inteira;
+    - NÃO mexe no src das imagens.
+    """
+    texto = limpar_cabecalho_xhtml_malformado(html)
+
+    css = """
+<style type="text/css">
+img {
+    max-width: 100% !important;
+    height: auto !important;
+    object-fit: contain !important;
+}
+body {
+    text-align: center !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+</style>
+"""
+
+    if re.search(r"</head\s*>", texto, flags=re.I):
+        texto = re.sub(r"</head\s*>", css + "\n</head>", texto, count=1, flags=re.I)
+    elif re.search(r"<body\b[^>]*>", texto, flags=re.I):
+        texto = re.sub(r"(<body\b[^>]*>)", r"\1\n" + css, texto, count=1, flags=re.I)
+    else:
+        texto = css + "\n" + texto
+
+    return texto
+
+
+def corrigir_opf_capa_sem_apagar(conteudo_opf):
+    """
+    Só reforça metadados de capa quando já existir uma imagem com nome de cover/capa.
+    Não apaga nada do OPF. Isso ajuda Kindle/Calibre a reconhecer a capa.
+    """
+    try:
+        texto = conteudo_opf.decode("utf-8", errors="ignore")
+        original = texto
+
+        if 'properties="cover-image"' in texto or 'name="cover"' in texto or "name='cover'" in texto:
+            return conteudo_opf, False
+
+        cover_id = None
+
+        for m in re.finditer(r'<item\b[^>]*>', texto, flags=re.I):
+            tag = m.group(0)
+            if not re.search(r'media-type=["\']image/', tag, flags=re.I):
+                continue
+            if not re.search(r'href=["\'][^"\']*(cover|capa)[^"\']*\.(jpg|jpeg|png|webp)', tag, flags=re.I):
+                continue
+            id_match = re.search(r'id=["\']([^"\']+)["\']', tag, flags=re.I)
+            if id_match:
+                cover_id = id_match.group(1)
+                break
+
+        if not cover_id:
+            return conteudo_opf, False
+
+        if re.search(r"</metadata\s*>", texto, flags=re.I):
+            texto = re.sub(
+                r"</metadata\s*>",
+                f'<meta name="cover" content="{cover_id}"/>\n</metadata>',
+                texto,
+                count=1,
+                flags=re.I
+            )
+
+        item_pattern = r'(<item\b(?=[^>]*id=["\']' + re.escape(cover_id) + r'["\'])(?![^>]*properties=)[^>]*)(/?>)'
+        texto = re.sub(item_pattern, r'\1 properties="cover-image"\2', texto, count=1, flags=re.I)
+
+        if texto != original:
+            return texto.encode("utf-8", errors="xmlcharrefreplace"), True
+
+    except Exception:
+        pass
+
+    return conteudo_opf, False
+
 def limpar_epub_rapido(entrada, saida):
     """
-    Limpa EPUB sem quebrar imagens e sem quebrar OPF/NCX/XML.
-    IMPORTANTE:
-    Não limpar .opf/.ncx/.xml com regex de URL, porque esses arquivos têm
-    namespaces obrigatórios com http://. Se remover, alguns apps dão erro de decodificação.
+    Limpa EPUB sem quebrar Kindle:
+    - NÃO remove imagens do ZIP;
+    - NÃO mexe em caminhos src/href das imagens;
+    - NÃO limpa OPF/NCX/XML com regex de URL;
+    - reforça metadados de capa no OPF quando possível;
+    - páginas de capa/imagem recebem limpeza leve, sem reconstrução agressiva.
     """
     alterados = 0
     arquivos = {}
@@ -681,11 +769,14 @@ def limpar_epub_rapido(entrada, saida):
                 alterados += 1
                 continue
 
-            # Só limpa capítulos HTML. Preserva imagens e estrutura.
             if nome_lower.endswith((".html", ".xhtml", ".htm")):
                 try:
                     texto = data.decode("utf-8", errors="ignore")
-                    novo = limpar_html_pesado(texto)
+
+                    if html_parece_pagina_de_imagem_raw(texto):
+                        novo = limpar_html_imagem_sem_reescrever(texto)
+                    else:
+                        novo = limpar_html_pesado(texto)
 
                     if novo != texto:
                         alterados += 1
@@ -694,20 +785,25 @@ def limpar_epub_rapido(entrada, saida):
                 except Exception:
                     pass
 
-            # CSS pode ser limpo, mas sem destruir o EPUB se der erro.
+            elif nome_lower.endswith(".opf"):
+                # OPF é sagrado para Kindle. Não limpar URLs/namespaces aqui.
+                data_nova, mudou = corrigir_opf_capa_sem_apagar(data)
+                if mudou:
+                    alterados += 1
+                    data = data_nova
+
             elif nome_lower.endswith(".css"):
+                # Não remover URLs do CSS, porque isso pode quebrar fontes/imagens no Kindle.
+                # Só remove cabeçalho XHTML quebrado se tiver vazado por engano.
                 try:
                     texto = data.decode("utf-8", errors="ignore")
-                    novo = limpar_texto_pesado(texto)
-
-                    if novo != texto:
+                    novo = limpar_lixo_html_quebrado_texto(texto)
+                    if novo != texto and novo.strip():
                         alterados += 1
                         data = novo.encode("utf-8", errors="xmlcharrefreplace")
-
                 except Exception:
                     pass
 
-            # .opf/.ncx/.xml ficam intactos para manter compatibilidade.
             arquivos[nome] = data
 
     escrever_epub_valido(saida, arquivos)
@@ -716,12 +812,6 @@ def limpar_epub_rapido(entrada, saida):
         raise Exception("A limpeza terminou, mas o EPUB limpo não foi criado.")
 
     return alterados
-
-
-
-
-
-
 
 def extrair_htmls_epub_ordenado(caminho_epub):
     """
@@ -847,22 +937,30 @@ def ebook_convert_disponivel():
 
 
 def limpar_epub_para_calibre(caminho_epub):
+    """
+    Prepara EPUB para o Calibre sem quebrar capa/imagens.
+    Mantém mimetype sem compressão e só remove encryption.xml.
+    """
     caminho_epub = Path(caminho_epub)
     if caminho_epub.suffix.lower() != ".epub":
         return caminho_epub
+
     saida = TEMP_DIR / f"calibre_limpo_{uuid.uuid4().hex}.epub"
+
     try:
+        arquivos = {}
         with zipfile.ZipFile(caminho_epub, "r") as zin:
-            with zipfile.ZipFile(saida, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-                for item in zin.infolist():
-                    nome = item.filename.replace("\\", "/").lower()
-                    if nome == "meta-inf/encryption.xml":
-                        continue
-                    zout.writestr(item, zin.read(item.filename))
+            for item in zin.infolist():
+                nome = item.filename.replace("\\", "/")
+                if nome.lower() == "meta-inf/encryption.xml":
+                    continue
+                arquivos[nome] = zin.read(item.filename)
+
+        escrever_epub_valido(saida, arquivos)
         return saida
+
     except Exception:
         return caminho_epub
-
 
 def ambiente_calibre():
     env = os.environ.copy()
@@ -900,11 +998,13 @@ def rodar_calibre(entrada, saida, formato_saida, timeout=3600):
             "--pdf-default-font-size", "14",
             "--disable-font-rescaling",
             "--chapter-mark", "none",
+            "--preserve-cover-aspect-ratio",
         ]
 
     elif formato_saida in ["epub", "mobi", "azw3", "fb2", "lit", "lrf", "pdb", "rb", "snb", "tcr", "txtz", "htmlz", "kepub"]:
         comando_base += [
             "--chapter-mark", "none",
+            "--preserve-cover-aspect-ratio",
         ]
 
     xvfb = shutil.which("xvfb-run")
@@ -982,23 +1082,32 @@ def limpar_sessao_capa(user_id):
 
 
 def remover_varias_imagens_epub(entrada, saida, nomes_imagens):
+    """
+    Remove a imagem VISUALMENTE das páginas, mas não apaga o arquivo do EPUB.
+    Isso é mais seguro para Kindle, porque apagar item do manifest pode fazer
+    capa/imagens sumirem ou o livro ficar incompatível.
+    """
     book = epub.read_epub(str(entrada))
     nomes_limpos = [nome.replace("\\", "/").split("/")[-1] for nome in nomes_imagens]
+
     for item in book.get_items_of_type(ITEM_DOCUMENT):
         try:
             html = item.get_content().decode("utf-8", errors="ignore")
             soup = criar_soup_epub(html)
+
             for img in soup.find_all("img"):
                 src = img.get("src", "")
                 src_limpo = src.replace("\\", "/").split("/")[-1]
                 if src in nomes_imagens or src_limpo in nomes_limpos:
                     img.decompose()
-            item.set_content(str(soup).encode("utf-8"))
+
+            item.set_content(str(soup).encode("utf-8", errors="xmlcharrefreplace"))
         except Exception:
             pass
-    book.items = [item for item in book.items if getattr(item, "file_name", "") not in nomes_imagens and getattr(item, "file_name", "").replace("\\", "/").split("/")[-1] not in nomes_limpos]
-    epub.write_epub(str(saida), book)
 
+    # NÃO usar mais book.items = [...]
+    # porque apagar item do manifest pode quebrar capa/imagens no Kindle.
+    epub.write_epub(str(saida), book)
 
 def trocar_imagem_epub(entrada, saida, nome_imagem, nova_imagem_bytes):
     book = epub.read_epub(str(entrada))
